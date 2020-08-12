@@ -1,0 +1,16 @@
+[package]
+name = "ostree-fuse"
+version = "0.1.0"
+authors = ["William Manley <will@stb-tester.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+fuse = "0.3"
+ostree-repo = {path="../ostree-repo"}
+libc = "0.2"
+time = "0.1"
+gvariant = "0.3"
+hex = "0.4"
+rand = "0.7"

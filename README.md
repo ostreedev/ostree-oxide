@@ -1,5 +1,5 @@
-ostree-rs
-=========
+ostree-oxide
+============
 
 A pure-rust implementation of tools for reading ostree repositories.  It does
 not link to or use libostree, but implements the ostree on-disk format.
@@ -17,4 +17,3 @@ Status
 This is an experimental proof of concept made for its own sake.  There is
 currently no stable API, little documentation and very few tests.  This may
 change in the future, but have no expectation that it will.
-

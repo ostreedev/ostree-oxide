@@ -44,9 +44,9 @@ dependencies = [
 
 [[package]]
 name = "gvariant"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "662e315e00c1046fac92789c5daf017a45b468dca00e97dafb56da3ff8f54e81"
+checksum = "7f7a982b6b38ff2380ea1b1b480cb7f5b51dac917aceff2e16af0c207781e13a"
 dependencies = [
  "gvariant-macro",
  "memchr",
@@ -55,9 +55,9 @@ dependencies = [
 
 [[package]]
 name = "gvariant-macro"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd0d4a4d2c36bc3597a2208c796bb315c5ca39d59529cdb6ffd7d6a268d7144f"
+checksum = "9915719ccd7435a28103eea8dba78bcf35a25d5637c70273b47dbb49c6d2eb6d"
 dependencies = [
  "syn",
 ]

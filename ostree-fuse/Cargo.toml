@@ -11,6 +11,6 @@ fuse = "0.3"
 ostree-repo = {path="../ostree-repo"}
 libc = "0.2"
 time = "0.1"
-gvariant = "0.3"
+gvariant = "0.4"
 hex = "0.4"
 rand = "0.7"

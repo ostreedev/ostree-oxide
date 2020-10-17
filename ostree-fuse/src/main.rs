@@ -245,22 +245,7 @@ impl OstreeFs {
             return Ok(sd.attr);
         }
         if let Some(oid) = self.files.get(&ino) {
-            return Ok(FileAttr {
-                ino: ino.as_u64(),
-                size: 0,
-                blocks: 0,
-                atime: UNIX_EPOCH,
-                mtime: UNIX_EPOCH,
-                ctime: UNIX_EPOCH,
-                crtime: UNIX_EPOCH,
-                kind: FileType::RegularFile,
-                perm: 0o755,
-                nlink: 1,
-                uid: 0,
-                gid: 0,
-                rdev: 0,
-                flags: 0,
-            });
+            return self.file_getattr(oid);
         }
 
         if let Some((dirmeta_oid, _)) = self.get_dir(ino) {
@@ -285,6 +270,38 @@ impl OstreeFs {
             return Ok(dir_attr(ino));
         }
         Err(ENOENT)
+    }
+    fn file_getattr(&self, oid: &ContentId) -> Result<FileAttr, i32> {
+        let meta = self.repo.read_meta(oid).map_err(|_| EIO)?;
+        let kind = match meta.mode & libc::S_IFMT {
+            libc::S_IFBLK => FileType::BlockDevice,
+            libc::S_IFCHR => FileType::CharDevice,
+            libc::S_IFDIR => FileType::Directory,
+            libc::S_IFIFO => FileType::NamedPipe,
+            libc::S_IFREG => FileType::RegularFile,
+            libc::S_IFSOCK => FileType::Socket,
+            libc::S_IFLNK => FileType::Symlink,
+            _ => {
+                eprintln!("Invalid metadata on file");
+                return Err(EIO);
+            }
+        };
+        return Ok(FileAttr {
+            ino: InodeNo::from_file_id(oid).as_u64(),
+            size: meta.size,
+            blocks: (meta.size + 511) / 512,
+            atime: UNIX_EPOCH,
+            mtime: UNIX_EPOCH,
+            ctime: UNIX_EPOCH,
+            crtime: UNIX_EPOCH,
+            kind: kind,
+            perm: (meta.mode & 0o777) as u16,
+            nlink: 1,
+            uid: meta.uid,
+            gid: meta.gid,
+            rdev: 0,
+            flags: 0,
+        });
     }
     fn lookup(&mut self, req: &fuse::Request, parent: u64, name: &OsStr) -> Result<FileAttr, i32> {
         let parent = InodeNo::from_u64(parent);
@@ -340,36 +357,7 @@ impl OstreeFs {
             }
             for fe in dt.iter_files() {
                 if fe.name == name {
-                    let meta = self.repo.read_meta(&fe.oid).map_err(|_| EIO)?;
-                    let kind = match meta.mode & libc::S_IFMT {
-                        libc::S_IFBLK => FileType::BlockDevice,
-                        libc::S_IFCHR => FileType::CharDevice,
-                        libc::S_IFDIR => FileType::Directory,
-                        libc::S_IFIFO => FileType::NamedPipe,
-                        libc::S_IFREG => FileType::RegularFile,
-                        libc::S_IFSOCK => FileType::Socket,
-                        libc::S_IFLNK => FileType::Symlink,
-                        _ => {
-                            eprintln!("Invalid metadata on file");
-                            return Err(EIO);
-                        }
-                    };
-                    return Ok(FileAttr {
-                        ino: InodeNo::from_file_id(fe.oid).as_u64(),
-                        size: meta.size,
-                        blocks: (meta.size + 511) / 512,
-                        atime: UNIX_EPOCH,
-                        mtime: UNIX_EPOCH,
-                        ctime: UNIX_EPOCH,
-                        crtime: UNIX_EPOCH,
-                        kind: kind,
-                        perm: (meta.mode & 0o777) as u16,
-                        nlink: 1,
-                        uid: meta.uid,
-                        gid: meta.gid,
-                        rdev: 0,
-                        flags: 0,
-                    });
+                    return self.file_getattr(&fe.oid);
                 }
             }
             //let dm_data = self.repo.read_object(&dm.0, ObjType::DIRMETA).map_err(|_| ENOENT)?;

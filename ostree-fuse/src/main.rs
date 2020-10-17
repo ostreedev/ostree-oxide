@@ -99,6 +99,7 @@ impl InodeNo {
     }
 }
 
+#[cfg(test)]
 mod test {
     use crate::InodeNo;
     use ostree_repo::{DirMetaId, DirTreeId, Oid};

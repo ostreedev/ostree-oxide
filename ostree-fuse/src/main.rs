@@ -1,11 +1,7 @@
 use fuse::{mount, FileAttr, FileType, Filesystem};
-use gvariant::{aligned_bytes::AsAligned, gv, Marker, Structure};
 use hex::FromHex;
 use libc::{c_int, EINVAL, EIO, ENOENT, ENOSYS};
-use ostree_repo::{
-    buf_as_commit, CommitId, ContentId, DirEntry, DirMetaId, DirTreeId, FileEntry, ObjId, ObjType,
-    Oid, Repo,
-};
+use ostree_repo::{CommitId, ContentId, DirMetaId, DirTreeId, Oid, Repo};
 use std::os::unix::ffi::OsStrExt;
 use std::{
     collections::HashMap,
@@ -213,38 +209,29 @@ impl OstreeFs {
             return Ok(());
         }
         let (_, dt) = self.get_dir(ino).ok_or(EINVAL)?;
-        let dt_data = self.repo.read_object(&dt.into()).map_err(|_| EIO)?;
-        let (files, dirs) = gv!("(a(say)a(sayay))")
-            .cast(&dt_data.as_aligned())
-            .to_tuple();
+        let dt_data = self.repo.read_dirtree(&dt).map_err(|_| EIO)?;
+        let dt = dt_data.as_dirtree();
         let mut next_offset: i64 = offset as i64 + 1;
+        let dirs = dt.iter_dirs();
         if offset >= dirs.len() {
             offset -= dirs.len();
         } else {
-            for dir in dirs.iter().skip(offset) {
-                let de = match DirEntry::from_tuple(dir.to_tuple()) {
-                    Some(x) => x,
-                    None => continue,
-                };
-                let sub_ino = InodeNo::from_dir_oid(de.dirmeta_id, de.dirtree_id);
+            for dir in dirs.skip(offset) {
+                let sub_ino = InodeNo::from_dir_oid(dir.dirmeta_id, dir.dirtree_id);
                 offset = offset.saturating_sub(1);
-                if reply.add(sub_ino.as_u64(), next_offset, FileType::Directory, de.name) {
+                if reply.add(sub_ino.as_u64(), next_offset, FileType::Directory, dir.name) {
                     return Ok(());
                 }
                 next_offset += 1;
             }
         }
-        for file in files.iter().skip(offset) {
-            let fe = match FileEntry::from_tuple(file.to_tuple()) {
-                Some(x) => x,
-                None => continue,
-            };
-            let sub_ino = InodeNo::from_file_id(fe.oid);
+        for file in dt.iter_files().skip(offset) {
+            let sub_ino = InodeNo::from_file_id(file.oid);
             if reply.add(
                 sub_ino.as_u64(),
                 next_offset,
                 FileType::RegularFile,
-                fe.name,
+                file.name,
             ) {
                 return Ok(());
             }
@@ -310,14 +297,14 @@ impl OstreeFs {
         }
         if parent == InodeNo::BY_COMMIT {
             if let Ok(oid) = Oid::from_hex(name.as_bytes()) {
-                let buf = match self.repo.read_object(&CommitId(oid).into()) {
+                let buf = match self.repo.read_commit(&CommitId(oid)) {
                     Ok(x) => x,
                     Err(err) => {
                         eprintln!("Error loading commit {:?}: {:?}", oid, err);
                         return Err(ENOENT);
                     }
                 };
-                let commit = buf_as_commit(&buf);
+                let commit = buf.as_commit();
                 // TODO: Lookup the attrs from the dirmeta
                 return Ok(dir_attr(InodeNo::from_dir_oid(
                     commit.dirmeta,
@@ -327,16 +314,10 @@ impl OstreeFs {
                 eprintln!("Invalid commit oid: {:?}", name);
             }
         }
-        if let Some((dm, dt)) = self.get_dir(parent) {
-            let dt_data = self.repo.read_object(&dt.into()).map_err(|_| ENOENT)?;
-            let (files, dirs) = gv!("(a(say)a(sayay))")
-                .cast(&dt_data.as_aligned())
-                .to_tuple();
-            for dir in dirs.iter() {
-                let de = match DirEntry::from_tuple(dir.to_tuple()) {
-                    Some(x) => x,
-                    None => continue,
-                };
+        if let Some((dm, dtid)) = self.get_dir(parent) {
+            let dt_data = self.repo.read_dirtree(&dtid).map_err(|_| ENOENT)?;
+            let dt = dt_data.as_dirtree();
+            for de in dt.iter_dirs() {
                 if de.name == name {
                     return Ok(FileAttr {
                         ino: InodeNo::from_dir_oid(de.dirmeta_id, de.dirtree_id).as_u64(),
@@ -357,11 +338,7 @@ impl OstreeFs {
                     });
                 }
             }
-            for file in files.iter() {
-                let fe = match FileEntry::from_tuple(file.to_tuple()) {
-                    Some(x) => x,
-                    None => continue,
-                };
+            for fe in dt.iter_files() {
                 if fe.name == name {
                     let meta = self.repo.read_meta(&fe.oid).map_err(|_| EIO)?;
                     let kind = match meta.mode & libc::S_IFMT {

@@ -1,5 +1,5 @@
 use gvariant::{
-    aligned_bytes::{copy_to_align, read_to_slice, AlignedSlice, A4, A8},
+    aligned_bytes::{copy_to_align, read_to_slice, AlignedSlice, AsAligned, A1, A4, A8},
     gv, Marker, Structure,
 };
 use hex::{FromHex, ToHex};
@@ -186,6 +186,12 @@ impl Repo {
         let f = self.open_object(oid)?;
         Ok(read_to_slice(f, None)?)
     }
+    pub fn read_dirtree(&self, oid: &DirTreeId) -> Result<OwnedDirTree, Box<dyn Error>> {
+        Ok(OwnedDirTree(self.read_object(&(*oid).into())?))
+    }
+    pub fn read_commit(&self, oid: &CommitId) -> Result<OwnedCommit, Box<dyn Error>> {
+        Ok(OwnedCommit(self.read_object(&(*oid).into())?))
+    }
     pub fn for_each_object(&self, mut cb: impl FnMut(&ObjId)) -> Result<(), Box<dyn Error>> {
         let mut tmp = vec![];
         for x in 0u8..=255 {
@@ -261,7 +267,7 @@ impl Repo {
     }
 }
 
-pub fn buf_as_commit<'buf>(buf: &'buf AlignedSlice<A8>) -> Commit<'buf> {
+fn buf_as_commit<'buf>(buf: &'buf AlignedSlice<A8>) -> Commit<'buf> {
     let c = gv!("(a{sv}aya(say)sstayay)").cast(&buf);
     let (_, parent, _, _, _, _, dirtree, dirmeta) = c.to_tuple();
 
@@ -278,8 +284,48 @@ pub struct Commit<'a> {
     pub dirmeta: &'a DirMetaId,
 }
 
+pub struct OwnedCommit(Box<AlignedSlice<A8>>);
+impl OwnedCommit {
+    pub fn as_commit(&self) -> Commit<'_> {
+        self.into()
+    }
+}
+impl<'a> From<&'a OwnedCommit> for Commit<'a> {
+    fn from(x: &'a OwnedCommit) -> Self {
+        buf_as_commit(&x.0)
+    }
+}
+
 // (a(say)a(sayay))
-pub struct DirTree {}
+#[derive(Debug, RefCast)]
+#[repr(transparent)]
+pub struct DirTree<'a>(&'a AlignedSlice<A1>);
+
+pub struct OwnedDirTree(Box<AlignedSlice<A8>>);
+impl OwnedDirTree {
+    pub fn as_dirtree(&self) -> DirTree<'_> {
+        self.into()
+    }
+}
+impl<'a> From<&'a OwnedDirTree> for DirTree<'a> {
+    fn from(x: &'a OwnedDirTree) -> Self {
+        DirTree(&x.0.as_aligned())
+    }
+}
+
+impl<'a> DirTree<'a> {
+    pub fn from_bytes(b: &'a [u8]) -> Self {
+        DirTree(b.as_aligned())
+    }
+    pub fn iter_files(&'a self) -> impl Iterator<Item = FileEntry<'a>> + ExactSizeIterator {
+        let files = gv!("(a(say)a(sayay))").cast(&self.0).to_tuple().0;
+        files.into_iter().map(|x| x.to_tuple().into())
+    }
+    pub fn iter_dirs(&'a self) -> impl Iterator<Item = DirEntry<'a>> + ExactSizeIterator {
+        let files = gv!("(a(say)a(sayay))").cast(&self.0).to_tuple().1;
+        files.into_iter().map(|x| x.to_tuple().into())
+    }
+}
 
 pub struct DirEntry<'a> {
     pub name: &'a str,
@@ -297,6 +343,16 @@ impl<'a> DirEntry<'a> {
     }
 }
 
+impl<'a> From<(&'a gvariant::Str, &'a [u8], &'a [u8])> for DirEntry<'a> {
+    fn from(t: (&'a gvariant::Str, &'a [u8], &'a [u8])) -> Self {
+        Self {
+            name: t.0.to_str(),
+            dirtree_id: DirTreeId::ref_cast(t.1.as_ref()),
+            dirmeta_id: DirMetaId::ref_cast(t.2.as_ref()),
+        }
+    }
+}
+
 pub struct FileEntry<'a> {
     pub name: &'a str,
     pub oid: &'a ContentId,
@@ -304,10 +360,16 @@ pub struct FileEntry<'a> {
 
 impl<'a> FileEntry<'a> {
     pub fn from_tuple(t: (&'a gvariant::Str, &'a [u8])) -> Option<Self> {
-        Some(Self {
-            name: t.0.to_str(),
-            oid: ContentId::ref_cast(Oid::try_from_slice(t.1)?),
-        })
+        Some(t.into())
+    }
+}
+
+impl<'a> From<(&'a gvariant::Str, &'a [u8])> for FileEntry<'a> {
+    fn from(x: (&'a gvariant::Str, &'a [u8])) -> Self {
+        FileEntry {
+            name: x.0.to_str(),
+            oid: ContentId::ref_cast(x.1.as_ref()),
+        }
     }
 }
 

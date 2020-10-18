@@ -272,7 +272,7 @@ impl OstreeFs {
                 return Err(EIO);
             }
         };
-        return Ok(FileAttr {
+        Ok(FileAttr {
             ino: InodeNo::from_file_id(oid).as_u64(),
             size: meta.size,
             blocks: (meta.size + 511) / 512,
@@ -287,7 +287,7 @@ impl OstreeFs {
             gid: meta.gid,
             rdev: 0,
             flags: 0,
-        });
+        })
     }
     fn dir_getattr(&self, dirmeta_id: &DirMetaId, dirtree_id: &DirTreeId) -> Result<FileAttr, i32> {
         let meta = self.repo.read_dirmeta(&dirmeta_id).map_err(|_| EIO)?;
@@ -308,7 +308,7 @@ impl OstreeFs {
             flags: 0,
         })
     }
-    fn lookup(&mut self, req: &fuse::Request, parent: u64, name: &OsStr) -> Result<FileAttr, i32> {
+    fn lookup(&mut self, _req: &fuse::Request, parent: u64, name: &OsStr) -> Result<FileAttr, i32> {
         let parent = InodeNo::from_u64(parent);
         if let Some(sd) = static_dir(parent) {
             for attr in sd.entries.iter() {
@@ -336,12 +336,12 @@ impl OstreeFs {
                 eprintln!("Invalid commit oid: {:?}", name);
             }
         }
-        if let Some((dm, dtid)) = self.get_dir(parent) {
+        if let Some((_, dtid)) = self.get_dir(parent) {
             let dt_data = self.repo.read_dirtree(&dtid).map_err(|_| ENOENT)?;
             let dt = dt_data.as_dirtree();
             for de in dt.iter_dirs() {
                 if de.name == name {
-                    return self.dir_getattr(&de.dirmeta_id, &de.dirtree_id)
+                    return self.dir_getattr(&de.dirmeta_id, &de.dirtree_id);
                 }
             }
             for fe in dt.iter_files() {
@@ -408,7 +408,7 @@ impl Filesystem for OstreeFs {
             reply.error(ENOENT)
         }
     }
-    fn open(&mut self, _req: &fuse::Request, ino: u64, flags: u32, reply: fuse::ReplyOpen) {
+    fn open(&mut self, _req: &fuse::Request, _ino: u64, _flags: u32, reply: fuse::ReplyOpen) {
         //eprintln!("open(ino: {:?}, flags: {:?})", ino, flags);
         reply.opened(0, 0);
     }
@@ -443,7 +443,7 @@ impl Filesystem for OstreeFs {
     ) {
         reply.ok();
     }
-    fn opendir(&mut self, _req: &fuse::Request, ino: u64, flags: u32, reply: fuse::ReplyOpen) {
+    fn opendir(&mut self, _req: &fuse::Request, _ino: u64, _flags: u32, reply: fuse::ReplyOpen) {
         //eprintln!("opendir(ino: {:?}, flags: {:?})", ino, flags);
         reply.opened(0, 0);
     }

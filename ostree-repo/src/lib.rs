@@ -3,7 +3,6 @@ use gvariant::{
     gv, Marker, Structure,
 };
 use hex::{FromHex, ToHex};
-use memchr;
 use nix::{dir::Dir, fcntl::OFlag, sys::stat::Mode};
 use ref_cast::RefCast;
 use std::{
@@ -177,7 +176,7 @@ impl Repo {
         let file = self.open_object(&ObjId::Content(*oid))?;
         let meta = file
             .get_xattr("user.ostreemeta")?
-            .ok_or(std::io::Error::from(std::io::ErrorKind::NotFound))?;
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
         let meta = copy_to_align(&meta);
         let m = file.metadata()?;
         Ok(Meta::from_data(meta.as_ref(), m.len()))
@@ -209,7 +208,7 @@ impl Repo {
             let mut d = match d {
                 Ok(d) => d,
                 Err(nix::Error::Sys(nix::errno::Errno::ENOENT)) => continue,
-                Err(x) => Err(x)?,
+                Err(x) => return Err(x.into()),
             };
             for y in d.iter() {
                 let e = y?;
@@ -392,7 +391,7 @@ impl Meta {
             uid: u32::from_be(*uid),
             gid: u32::from_be(*gid),
             mode: u32::from_be(*mode),
-            size: size,
+            size,
         }
     }
 }

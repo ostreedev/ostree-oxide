@@ -249,23 +249,8 @@ impl OstreeFs {
             return self.file_getattr(oid);
         }
 
-        if let Some((dirmeta_oid, _)) = self.get_dir(ino) {
-            return Ok(FileAttr {
-                ino: ino.as_u64(),
-                size: 0,
-                blocks: 0,
-                atime: UNIX_EPOCH,
-                mtime: UNIX_EPOCH,
-                ctime: UNIX_EPOCH,
-                crtime: UNIX_EPOCH,
-                kind: FileType::Directory,
-                perm: 0o755,
-                nlink: 1,
-                uid: 0,
-                gid: 0,
-                rdev: 0,
-                flags: 0,
-            });
+        if let Some((dirmeta_id, dirtree_id)) = self.get_dir(ino) {
+            return self.dir_getattr(&dirmeta_id, &dirtree_id);
         }
         if self.commits.contains_key(&ino) {
             return Ok(dir_attr(ino));
@@ -304,6 +289,25 @@ impl OstreeFs {
             flags: 0,
         });
     }
+    fn dir_getattr(&self, dirmeta_id: &DirMetaId, dirtree_id: &DirTreeId) -> Result<FileAttr, i32> {
+        let meta = self.repo.read_dirmeta(&dirmeta_id).map_err(|_| EIO)?;
+        Ok(FileAttr {
+            ino: InodeNo::from_dir_oid(dirmeta_id, dirtree_id).as_u64(),
+            size: 0,
+            blocks: 0,
+            atime: UNIX_EPOCH,
+            mtime: UNIX_EPOCH,
+            ctime: UNIX_EPOCH,
+            crtime: UNIX_EPOCH,
+            kind: FileType::Directory,
+            perm: (meta.mode & 0o7777) as u16,
+            nlink: 1,
+            uid: meta.uid,
+            gid: meta.gid,
+            rdev: 0,
+            flags: 0,
+        })
+    }
     fn lookup(&mut self, req: &fuse::Request, parent: u64, name: &OsStr) -> Result<FileAttr, i32> {
         let parent = InodeNo::from_u64(parent);
         if let Some(sd) = static_dir(parent) {
@@ -337,23 +341,7 @@ impl OstreeFs {
             let dt = dt_data.as_dirtree();
             for de in dt.iter_dirs() {
                 if de.name == name {
-                    return Ok(FileAttr {
-                        ino: InodeNo::from_dir_oid(de.dirmeta_id, de.dirtree_id).as_u64(),
-                        size: 0,
-                        blocks: 0,
-                        atime: UNIX_EPOCH,
-                        mtime: UNIX_EPOCH,
-                        ctime: UNIX_EPOCH,
-                        crtime: UNIX_EPOCH,
-                        kind: FileType::Directory,
-                        // TODO: Get permissions from dirmeta
-                        perm: 0o755,
-                        nlink: 2,
-                        uid: 0,
-                        gid: 0,
-                        rdev: 0,
-                        flags: 0,
-                    });
+                    return self.dir_getattr(&de.dirmeta_id, &de.dirtree_id)
                 }
             }
             for fe in dt.iter_files() {
@@ -361,8 +349,6 @@ impl OstreeFs {
                     return self.file_getattr(&fe.oid);
                 }
             }
-            //let dm_data = self.repo.read_object(&dm.0, ObjType::DIRMETA).map_err(|_| ENOENT)?;
-            //let (uid, gid, mode, xattrs) = gv!("(uuua(ayay))").cast(&dm_data.as_aligned()).to_tuple();
         }
         Err(ENOENT)
     }
@@ -410,7 +396,7 @@ impl Filesystem for OstreeFs {
         //);
         out
     }
-    fn readlink(&mut self, _req: &fuse::Request, ino: u64, mut reply: fuse::ReplyData) {
+    fn readlink(&mut self, _req: &fuse::Request, ino: u64, reply: fuse::ReplyData) {
         //eprintln!("readlink(ino: {:?})", ino);
         let ino = InodeNo::from_u64(ino);
         if let Some(oid) = self.files.get(&ino) {

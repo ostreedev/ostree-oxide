@@ -192,6 +192,10 @@ impl Repo {
     pub fn read_commit(&self, oid: &CommitId) -> Result<OwnedCommit, Box<dyn Error>> {
         Ok(OwnedCommit(self.read_object(&(*oid).into())?))
     }
+    pub fn read_dirmeta(&self, oid: &DirMetaId) -> Result<Meta, Box<dyn Error>> {
+        let data = self.read_object(&(*oid).into())?;
+        Ok(Meta::from_data(&*data.as_aligned(), 0))
+    }
     pub fn for_each_object(&self, mut cb: impl FnMut(&ObjId)) -> Result<(), Box<dyn Error>> {
         let mut tmp = vec![];
         for x in 0u8..=255 {

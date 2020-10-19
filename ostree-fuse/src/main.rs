@@ -281,7 +281,7 @@ impl OstreeFs {
             ctime: UNIX_EPOCH,
             crtime: UNIX_EPOCH,
             kind: kind,
-            perm: (meta.mode & 0o777) as u16,
+            perm: (meta.mode & 0o7777) as u16,
             nlink: 1,
             uid: meta.uid,
             gid: meta.gid,

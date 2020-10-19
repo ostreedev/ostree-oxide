@@ -14,6 +14,11 @@ ostree init --repo=bare-user --mode=bare-user
 ostree --repo=bare-user remote add archive --no-gpg-verify file://$PWD/archive
 ostree --repo=bare-user pull --mirror archive fs
 ostree --repo=bare-user remote delete archive
+
+# Work around bug in tar extracting non-writable files with xattrs set.  See
+# https://savannah.gnu.org/bugs/?59184
+chmod -R u+w bare-user/objects
+
 $TAR_DETERMINISTIC -C bare-user -cv --owner=0 --group=0 --xattrs . >bare-user.tar
 
 sudo rm -rf bare

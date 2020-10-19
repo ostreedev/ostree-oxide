@@ -499,6 +499,92 @@ impl Filesystem for OstreeFs {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::{ffi::OsStr, fs::create_dir, fs::File, io::Write, path::PathBuf, process::Stdio};
+
+    use ostree_repo::Repo;
+    use tempfile::tempdir;
+
+    use crate::*;
+
+    const FS_TAR: &[u8] = include_bytes!("../../ostree-repo/testdata/fs.tar");
+    const BARE_USER_REPO_TAR: &[u8] = include_bytes!("../../ostree-repo/testdata/bare-user.tar");
+    const COMMIT_OID: &str = "247b95a821f9cca301513b1ed57224b906d7e8fe117936db82afac43acee024a";
+
+    #[test]
+    fn test_retar() {
+        // Setup
+        let tmp = tempdir().unwrap();
+        let mountpoint = tmp.path().join("repo");
+        let repo = tmp.path().join("mnt");
+        create_dir(&mountpoint).unwrap();
+        create_dir(&repo).unwrap();
+
+        let mut bare_user_repo = tar::Archive::new(BARE_USER_REPO_TAR);
+        bare_user_repo.set_unpack_xattrs(true);
+        bare_user_repo.set_preserve_permissions(true);
+        bare_user_repo.unpack(&repo).unwrap();
+
+        let repo = Repo::open(&repo).unwrap();
+        let options = ["-o", "ro", "-o", "fsname=hello"]
+            .iter()
+            .map(|o| o.as_ref())
+            .collect::<Vec<&OsStr>>();
+
+        // The invariants to uphold for this unsafe aren't made explicit in the
+        // fuse-rs documentations, but this is only tests.  See also
+        // https://github.com/zargony/fuse-rs/commit/babbfd5ec216b9a7fb43a75872d69c3dfd01879e
+        let _m = unsafe {
+            fuse::spawn_mount(
+                OstreeFs::new_from_repo(repo).unwrap(),
+                &mountpoint,
+                &options,
+            )
+            .unwrap()
+        };
+
+        let fs_path = mountpoint.join("by-commit").join(COMMIT_OID);
+        let retar = std::process::Command::new("tar")
+            .args(&[
+                "-c",
+                "-C",
+                &fs_path.to_str().unwrap(),
+                "--sort=name",
+                "--numeric-owner",
+                "--xattrs",
+                "--format=posix",
+                "--mtime=1970-01-01 00:00Z",
+                "-v",
+                "--pax-option=exthdr.name=%d/PaxHeaders/%f,atime:=0,ctime:=0",
+                ".",
+            ])
+            .stderr(Stdio::inherit())
+            .output()
+            .unwrap()
+            .stdout;
+        if retar != FS_TAR {
+            File::create(tmp.path().join("expected.tar"))
+                .unwrap()
+                .write_all(FS_TAR)
+                .unwrap();
+            File::create(tmp.path().join("actual.tar"))
+                .unwrap()
+                .write_all(&retar)
+                .unwrap();
+            let o = std::process::Command::new("diffoscope")
+                .args(&[
+                    tmp.path().join("expected.tar"),
+                    tmp.path().join("actual.tar"),
+                ])
+                .output()
+                .unwrap();
+            println!("{}", std::str::from_utf8(&*o.stdout).unwrap());
+            assert!(false);
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let mountpoint = env::args_os().nth(2).unwrap();
     let repo: PathBuf = env::args_os().nth(1).unwrap().try_into()?;

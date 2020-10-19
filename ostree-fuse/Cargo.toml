@@ -14,3 +14,7 @@ time = "0.1"
 gvariant = "0.4"
 hex = "0.4"
 rand = "0.7"
+
+[dev-dependencies]
+tempfile = "3.1"
+tar = "0.4"

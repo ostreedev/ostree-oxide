@@ -148,9 +148,9 @@ pub struct Repo {
 }
 
 impl Repo {
-    pub fn open<'a>(path: impl Into<&'a std::path::Path>) -> Result<Self, Box<dyn Error>> {
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, Box<dyn Error>> {
         let repo = Dir::open(
-            path.into(),
+            path.as_ref(),
             OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_RDONLY,
             Mode::empty(),
         )?;

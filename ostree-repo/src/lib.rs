@@ -270,7 +270,7 @@ impl Repo {
     }
 }
 
-fn buf_as_commit<'buf>(buf: &'buf AlignedSlice<A8>) -> Commit<'buf> {
+fn buf_as_commit(buf: &AlignedSlice<A8>) -> Commit<'_> {
     let c = gv!("(a{sv}aya(say)sstayay)").cast(&buf);
     let (_, parent, _, _, _, _, dirtree, dirmeta) = c.to_tuple();
 

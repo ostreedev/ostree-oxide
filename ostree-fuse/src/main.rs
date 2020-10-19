@@ -19,13 +19,14 @@ const FOREVER: Timespec = Timespec {
     sec: i64::MAX,
     nsec: 0,
 };
+const TRACING: bool = false;
 
 struct StaticDir {
     attr: FileAttr,
     entries: &'static [(InodeNo, i64, FileType, &'static str)],
 }
 
-const STATIC_DIRS: &'static [StaticDir] = &[
+const STATIC_DIRS: &[StaticDir] = &[
     // /
     StaticDir {
         attr: dir_attr(InodeNo::ROOT),
@@ -70,8 +71,8 @@ impl InodeNo {
     const BY_COMMIT: InodeNo = InodeNo(2);
     const REFS: InodeNo = InodeNo(3);
 
-    const DIRTREE_MASK: u64 = 0x00000fffffffffff;
-    const DIRMETA_MASK: u64 = 0xfffff00000000000;
+    const DIRTREE_MASK: u64 = 0x0000_0fff_ffff_ffff;
+    const DIRMETA_MASK: u64 = 0xffff_f000_0000_0000;
 
     fn from_u64(inode: u64) -> Self {
         Self(inode)
@@ -91,7 +92,7 @@ impl InodeNo {
 
         InodeNo((dirmeta_high & Self::DIRMETA_MASK) | (dirtree_high & Self::DIRTREE_MASK))
     }
-    fn to_dir_sid(&self) -> (u64, u64) {
+    fn to_dir_sid(self) -> (u64, u64) {
         (self.0 & Self::DIRMETA_MASK, self.0 & Self::DIRTREE_MASK)
     }
     const fn as_u64(self) -> u64 {
@@ -114,7 +115,7 @@ mod test {
         let dm = DirMetaId(random_oid());
         let dt = DirTreeId(random_oid());
         let ino = InodeNo::from_dir_oid(&dm, &dt);
-        let (dmsid, dtsid) = ino.to_dir_sid();
+        let (_dmsid, _dtsid) = ino.to_dir_sid();
         todo!("What goes here?")
     }
 }
@@ -182,7 +183,6 @@ impl OstreeFs {
     }
     fn get_dir(&self, ino: InodeNo) -> Option<(DirMetaId, DirTreeId)> {
         let (dm, dt) = ino.to_dir_sid();
-        //eprintln!("dm: {:x} dt: {:x}", dm, dt);
         if let (Some(dirmeta_oid), Some(dirtree_oid)) =
             (self.dirmetas.get(&dm), self.dirtrees.get(&dt))
         {
@@ -205,7 +205,6 @@ impl OstreeFs {
         if let Some(d) = static_dir(ino) {
             for entry in d.entries.iter().skip(offset as usize) {
                 reply.add((entry.0).0, entry.1, entry.2, entry.3);
-                //eprintln!("Added entry {}", entry.3);
             }
             return Ok(());
         }
@@ -280,7 +279,7 @@ impl OstreeFs {
             mtime: UNIX_EPOCH,
             ctime: UNIX_EPOCH,
             crtime: UNIX_EPOCH,
-            kind: kind,
+            kind,
             perm: (meta.mode & 0o7777) as u16,
             nlink: 1,
             uid: meta.uid,
@@ -372,31 +371,35 @@ impl OstreeFs {
 
 impl Filesystem for OstreeFs {
     fn init(&mut self, _req: &fuse::Request) -> Result<(), c_int> {
-        //eprintln!("init()");
+        if TRACING {
+            eprintln!("init()");
+        }
         Ok(())
     }
     fn destroy(&mut self, _req: &fuse::Request) {}
     fn forget(&mut self, _req: &fuse::Request, _ino: u64, _nlookup: u64) {}
     fn getattr(&mut self, req: &fuse::Request, ino: u64, reply: fuse::ReplyAttr) {
-        //eprintln!("getattr(ino: {:?})", ino);
+        if TRACING {
+            eprintln!("getattr(ino: {:?})", ino);
+        }
         match self.getattr(req, ino) {
             Ok(x) => reply.attr(&FOREVER, &x),
             Err(errno) => reply.error(errno),
         }
     }
     fn lookup(&mut self, req: &fuse::Request, parent: u64, name: &OsStr, reply: fuse::ReplyEntry) {
-        let out = match self.lookup(req, parent, name) {
+        match self.lookup(req, parent, name) {
             Ok(attr) => reply.entry(&FOREVER, &attr, 0),
             Err(errno) => reply.error(errno),
         };
-        //eprintln!(
-        //   "lookup(parent: {:?}, name: {:?}) -> {:?}",
-        //    parent, name, out
-        //);
-        out
+        if TRACING {
+            eprintln!("lookup(parent: {:?}, name: {:?})", parent, name);
+        }
     }
     fn readlink(&mut self, _req: &fuse::Request, ino: u64, reply: fuse::ReplyData) {
-        //eprintln!("readlink(ino: {:?})", ino);
+        if TRACING {
+            eprintln!("readlink(ino: {:?})", ino);
+        }
         let ino = InodeNo::from_u64(ino);
         if let Some(oid) = self.files.get(&ino) {
             match self.repo.read_object(&(*oid).into()) {
@@ -407,8 +410,10 @@ impl Filesystem for OstreeFs {
             reply.error(ENOENT)
         }
     }
-    fn open(&mut self, _req: &fuse::Request, _ino: u64, _flags: u32, reply: fuse::ReplyOpen) {
-        //eprintln!("open(ino: {:?}, flags: {:?})", ino, flags);
+    fn open(&mut self, _req: &fuse::Request, ino: u64, flags: u32, reply: fuse::ReplyOpen) {
+        if TRACING {
+            eprintln!("open(ino: {:?}, flags: {:?})", ino, flags);
+        }
         reply.opened(0, 0);
     }
     fn read(
@@ -420,10 +425,12 @@ impl Filesystem for OstreeFs {
         size: u32,
         reply: fuse::ReplyData,
     ) {
-        //eprintln!(
-        //    "read(ino: {:?}, offset: {:?}, size: {:?})",
-        //    ino, offset, size
-        //);
+        if TRACING {
+            eprintln!(
+                "read(ino: {:?}, offset: {:?}, size: {:?})",
+                ino, offset, size
+            );
+        }
         let mut out = Vec::new();
         match self.read(req, ino, fh, offset, size, &mut out) {
             Ok(()) => reply.data(out.as_ref()),
@@ -442,8 +449,10 @@ impl Filesystem for OstreeFs {
     ) {
         reply.ok();
     }
-    fn opendir(&mut self, _req: &fuse::Request, _ino: u64, _flags: u32, reply: fuse::ReplyOpen) {
-        //eprintln!("opendir(ino: {:?}, flags: {:?})", ino, flags);
+    fn opendir(&mut self, _req: &fuse::Request, ino: u64, flags: u32, reply: fuse::ReplyOpen) {
+        if TRACING {
+            eprintln!("opendir(ino: {:?}, flags: {:?})", ino, flags);
+        }
         reply.opened(0, 0);
     }
     fn readdir(
@@ -454,7 +463,9 @@ impl Filesystem for OstreeFs {
         offset: i64,
         mut reply: fuse::ReplyDirectory,
     ) {
-        //eprintln!("readdir(ino: {:?}, offset: {:?})", ino, offset);
+        if TRACING {
+            eprintln!("readdir(ino: {:?}, offset: {:?})", ino, offset);
+        }
         match self.readdir(req, ino, fh, offset, &mut reply) {
             Ok(_) => reply.ok(),
             Err(x) => reply.error(x),
@@ -500,7 +511,7 @@ impl Filesystem for OstreeFs {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsStr, fs::create_dir, fs::File, io::Write, path::PathBuf, process::Stdio};
+    use std::{ffi::OsStr, fs::create_dir, fs::File, io::Write, process::Stdio};
 
     use ostree_repo::Repo;
     use tempfile::tempdir;

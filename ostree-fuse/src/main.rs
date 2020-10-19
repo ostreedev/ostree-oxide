@@ -252,8 +252,8 @@ impl OstreeFs {
         if let Some((dirmeta_id, dirtree_id)) = self.get_dir(ino) {
             return self.dir_getattr(&dirmeta_id, &dirtree_id);
         }
-        if self.commits.contains_key(&ino) {
-            return Ok(dir_attr(ino));
+        if let Some(commit_id) = self.commits.get(&ino) {
+            return self.commit_getattr(commit_id);
         }
         Err(ENOENT)
     }
@@ -308,6 +308,17 @@ impl OstreeFs {
             flags: 0,
         })
     }
+    fn commit_getattr(&self, oid: &CommitId) -> Result<FileAttr, i32> {
+        let buf = match self.repo.read_commit(&oid) {
+            Ok(x) => x,
+            Err(err) => {
+                eprintln!("Error loading commit {:?}: {:?}", oid, err);
+                return Err(ENOENT);
+            }
+        };
+        let commit = buf.as_commit();
+        self.dir_getattr(commit.dirmeta, commit.dirtree)
+    }
     fn lookup(&mut self, _req: &fuse::Request, parent: u64, name: &OsStr) -> Result<FileAttr, i32> {
         let parent = InodeNo::from_u64(parent);
         if let Some(sd) = static_dir(parent) {
@@ -319,19 +330,7 @@ impl OstreeFs {
         }
         if parent == InodeNo::BY_COMMIT {
             if let Ok(oid) = Oid::from_hex(name.as_bytes()) {
-                let buf = match self.repo.read_commit(&CommitId(oid)) {
-                    Ok(x) => x,
-                    Err(err) => {
-                        eprintln!("Error loading commit {:?}: {:?}", oid, err);
-                        return Err(ENOENT);
-                    }
-                };
-                let commit = buf.as_commit();
-                // TODO: Lookup the attrs from the dirmeta
-                return Ok(dir_attr(InodeNo::from_dir_oid(
-                    commit.dirmeta,
-                    commit.dirtree,
-                )));
+                return self.commit_getattr(&CommitId(oid));
             } else {
                 eprintln!("Invalid commit oid: {:?}", name);
             }

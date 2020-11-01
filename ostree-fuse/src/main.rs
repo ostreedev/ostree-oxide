@@ -402,7 +402,7 @@ impl Filesystem for OstreeFs {
         }
         let ino = InodeNo::from_u64(ino);
         if let Some(oid) = self.files.get(&ino) {
-            match self.repo.read_object(&(*oid).into()) {
+            match self.repo.read_content(oid) {
                 Ok(obj) => reply.data(&*obj),
                 Err(_) => reply.error(ENOENT),
             };

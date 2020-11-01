@@ -1,5 +1,5 @@
 use gvariant::{
-    aligned_bytes::{copy_to_align, read_to_slice, AlignedSlice, AsAligned, A1, A4, A8},
+    aligned_bytes::{copy_to_align, read_to_slice, AlignedSlice, Alignment, AsAligned, A1, A4, A8},
     gv, Marker, Structure,
 };
 use hex::{FromHex, ToHex};
@@ -10,7 +10,7 @@ use std::{
     error::Error,
     fmt::Display,
     fs::File,
-    io::Write,
+    io::{Read, Write},
     os::unix::io::{AsRawFd, FromRawFd},
     path::{Path, PathBuf},
 };
@@ -181,9 +181,18 @@ impl Repo {
         let m = file.metadata()?;
         Ok(Meta::from_data(meta.as_ref(), m.len()))
     }
-    pub fn read_object(&self, oid: &ObjId) -> Result<Box<AlignedSlice<A8>>, Box<dyn Error>> {
+    fn read_object<A: Alignment>(
+        &self,
+        oid: &ObjId,
+    ) -> Result<Box<AlignedSlice<A>>, Box<dyn Error>> {
         let f = self.open_object(oid)?;
         Ok(read_to_slice(f, None)?)
+    }
+    pub fn read_content(&self, oid: &ContentId) -> Result<Vec<u8>, Box<dyn Error>> {
+        let mut f = self.open_object(&(*oid).into())?;
+        let mut out = vec![];
+        f.read_to_end(&mut out)?;
+        Ok(out)
     }
     pub fn read_dirtree(&self, oid: &DirTreeId) -> Result<OwnedDirTree, Box<dyn Error>> {
         Ok(OwnedDirTree(self.read_object(&(*oid).into())?))
@@ -193,7 +202,7 @@ impl Repo {
     }
     pub fn read_dirmeta(&self, oid: &DirMetaId) -> Result<Meta, Box<dyn Error>> {
         let data = self.read_object(&(*oid).into())?;
-        Ok(Meta::from_data(&*data.as_aligned(), 0))
+        Ok(Meta::from_data(&*data, 0))
     }
     pub fn for_each_object(&self, mut cb: impl FnMut(&ObjId)) -> Result<(), Box<dyn Error>> {
         let mut tmp = vec![];
@@ -304,7 +313,7 @@ impl<'a> From<&'a OwnedCommit> for Commit<'a> {
 #[repr(transparent)]
 pub struct DirTree<'a>(&'a AlignedSlice<A1>);
 
-pub struct OwnedDirTree(Box<AlignedSlice<A8>>);
+pub struct OwnedDirTree(Box<AlignedSlice<A1>>);
 impl OwnedDirTree {
     pub fn as_dirtree(&self) -> DirTree<'_> {
         self.into()
@@ -312,7 +321,7 @@ impl OwnedDirTree {
 }
 impl<'a> From<&'a OwnedDirTree> for DirTree<'a> {
     fn from(x: &'a OwnedDirTree) -> Self {
-        DirTree(&x.0.as_aligned())
+        DirTree(&x.0)
     }
 }
 

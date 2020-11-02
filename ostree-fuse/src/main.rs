@@ -34,99 +34,12 @@ impl From<Errno> for std::io::Error {
     }
 }
 
-struct StaticDir {
-    attr: FileAttr,
-    entries: &'static [(InodeNo, i64, FileType, &'static str)],
-}
-
-const STATIC_DIRS: &[StaticDir] = &[
-    // /
-    StaticDir {
-        attr: dir_attr(InodeNo::ROOT),
-        entries: &[
-            (InodeNo::ROOT, 1, FileType::Directory, "."),
-            (InodeNo::ROOT, 2, FileType::Directory, ".."),
-            (InodeNo::BY_COMMIT, 3, FileType::Directory, "by-commit"),
-            (InodeNo::REFS, 4, FileType::Directory, "refs"),
-        ],
-    },
-    // /by-commit
-    StaticDir {
-        attr: dir_attr(InodeNo::BY_COMMIT),
-        entries: &[
-            (InodeNo::BY_COMMIT, 1, FileType::Directory, "."),
-            (InodeNo::ROOT, 2, FileType::Directory, ".."),
-        ],
-    },
-    // /refs
-    StaticDir {
-        attr: dir_attr(InodeNo::REFS),
-        entries: &[
-            (InodeNo::REFS, 1, FileType::Directory, "."),
-            (InodeNo::ROOT, 2, FileType::Directory, ".."),
-        ],
-    },
-];
-
-fn static_dir(inode: InodeNo) -> Option<&'static StaticDir> {
-    if inode.0 > 0 {
-        STATIC_DIRS.get((inode.0 - 1) as usize)
-    } else {
-        None
-    }
-}
-
-impl INode for &'static StaticDir {
-    fn readdir(
-        &mut self,
-        _fs: &OstreeFs,
-        offset: usize,
-        reply: &mut fuse::ReplyDirectory,
-    ) -> Result<(), i32> {
-        for entry in self.entries.iter().skip(offset as usize) {
-            reply.add((entry.0).0, entry.1, entry.2, entry.3);
-        }
-        Ok(())
-    }
-
-    fn getattr(&mut self, _fs: &OstreeFs) -> Result<FileAttr, i32> {
-        Ok(self.attr)
-    }
-
-    fn lookup(&mut self, fs: &OstreeFs, name: &OsStr) -> Result<FileAttr, i32> {
-        for attr in self.entries.iter() {
-            if name == attr.3 {
-                return Ok(dir_attr(attr.0));
-            }
-        }
-        if self.attr.ino == InodeNo::BY_COMMIT.as_u64() {
-            if let Ok(oid) = Oid::from_hex(name.as_bytes()) {
-                return Commit { oid: CommitId(oid) }.getattr(fs);
-            } else {
-                eprintln!("Invalid commit oid: {:?}", name);
-            }
-        }
-        Err(ENOENT)
-    }
-
-    fn read(
-        &mut self,
-        _fs: &OstreeFs,
-        _offset: i64,
-        _size: u32,
-        _reply: &mut Vec<u8>,
-    ) -> Result<(), std::io::Error> {
-        Err(Errno(EISDIR).into())
-    }
-}
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 struct InodeNo(u64);
 
 impl InodeNo {
     const ROOT: InodeNo = InodeNo(1);
     const BY_COMMIT: InodeNo = InodeNo(2);
-    const REFS: InodeNo = InodeNo(3);
 
     const DIRTREE_MASK: u64 = 0x0000_0fff_ffff_ffff;
     const DIRMETA_MASK: u64 = 0xffff_f000_0000_0000;
@@ -197,7 +110,8 @@ const fn dir_attr(ino: InodeNo) -> FileAttr {
 }
 
 enum FileRef {
-    Static(&'static StaticDir),
+    Root(Root),
+    ByCommit(ByCommit),
     Commit(Commit),
     Tree(Tree),
     File(Content),
@@ -206,12 +120,47 @@ enum FileRef {
 impl FileRef {
     fn as_inode_mut(&mut self) -> Result<&mut dyn INode, Errno> {
         Ok(match self {
-            FileRef::Static(x) => x,
+            FileRef::Root(x) => x,
+            FileRef::ByCommit(x) => x,
             FileRef::Commit(x) => x,
             FileRef::Tree(x) => x,
             FileRef::File(x) => x,
         })
     }
+}
+
+fn iter_readdir<'a, It: Iterator<Item = Result<(InodeNo, FileType, &'a OsStr), Errno>>>(
+    ino: InodeNo,
+    parent_ino: InodeNo,
+    it: It,
+    mut offset: usize,
+    reply: &mut fuse::ReplyDirectory,
+) -> Result<(), Errno> {
+    if offset == 0 {
+        offset += 1;
+        if reply.add(ino.as_u64(), offset as i64, FileType::Directory, ".") {
+            return Ok(());
+        }
+    }
+    if offset == 1 {
+        offset += 1;
+        if reply.add(
+            parent_ino.as_u64(),
+            offset as i64,
+            FileType::Directory,
+            "..",
+        ) {
+            return Ok(());
+        }
+    }
+    for x in it.skip(offset - 2) {
+        let (ino, kind, name) = x?;
+        if reply.add(ino.0, offset as i64 + 1, kind, name) {
+            break;
+        }
+        offset += 1
+    }
+    Ok(())
 }
 
 trait INode {
@@ -220,7 +169,7 @@ trait INode {
         fs: &OstreeFs,
         offset: usize,
         reply: &mut fuse::ReplyDirectory,
-    ) -> Result<(), i32>;
+    ) -> Result<(), Errno>;
     fn getattr(&mut self, fs: &OstreeFs) -> Result<FileAttr, i32>;
     fn lookup(&mut self, fs: &OstreeFs, name: &OsStr) -> Result<FileAttr, i32>;
     fn read(
@@ -230,6 +179,92 @@ trait INode {
         size: u32,
         reply: &mut Vec<u8>,
     ) -> Result<(), std::io::Error>;
+}
+
+struct Root {}
+impl INode for Root {
+    fn readdir(
+        &mut self,
+        _fs: &OstreeFs,
+        offset: usize,
+        reply: &mut fuse::ReplyDirectory,
+    ) -> Result<(), Errno> {
+        iter_readdir(
+            InodeNo::ROOT,
+            InodeNo::from_u64(0),
+            [Ok((
+                InodeNo::BY_COMMIT,
+                FileType::Directory,
+                OsStr::new("by-commit"),
+            ))]
+            .iter()
+            .copied(),
+            offset,
+            reply,
+        )
+    }
+
+    fn getattr(&mut self, _fs: &OstreeFs) -> Result<FileAttr, i32> {
+        Ok(dir_attr(InodeNo::ROOT))
+    }
+
+    fn lookup(&mut self, _fs: &OstreeFs, name: &OsStr) -> Result<FileAttr, i32> {
+        match name.to_str() {
+            Some("by-commit") => Ok(dir_attr(InodeNo::BY_COMMIT)),
+            _ => Err(ENOENT),
+        }
+    }
+
+    fn read(
+        &mut self,
+        _fs: &OstreeFs,
+        _offset: i64,
+        _size: u32,
+        _reply: &mut Vec<u8>,
+    ) -> Result<(), std::io::Error> {
+        Err(Errno(EISDIR).into())
+    }
+}
+
+struct ByCommit {}
+impl INode for ByCommit {
+    fn readdir(
+        &mut self,
+        _fs: &OstreeFs,
+        offset: usize,
+        reply: &mut fuse::ReplyDirectory,
+    ) -> Result<(), Errno> {
+        iter_readdir(
+            InodeNo::BY_COMMIT,
+            InodeNo::ROOT,
+            [].iter().map(|x| *x),
+            offset,
+            reply,
+        )
+    }
+
+    fn getattr(&mut self, _fs: &OstreeFs) -> Result<FileAttr, i32> {
+        Ok(dir_attr(InodeNo::BY_COMMIT))
+    }
+
+    fn lookup(&mut self, fs: &OstreeFs, name: &OsStr) -> Result<FileAttr, i32> {
+        if let Ok(oid) = Oid::from_hex(name.as_bytes()) {
+            Commit { oid: CommitId(oid) }.getattr(fs)
+        } else {
+            eprintln!("Invalid commit oid: {:?}", name);
+            Err(ENOENT)
+        }
+    }
+
+    fn read(
+        &mut self,
+        _fs: &OstreeFs,
+        _offset: i64,
+        _size: u32,
+        _reply: &mut Vec<u8>,
+    ) -> Result<(), std::io::Error> {
+        Err(Errno(EISDIR).into())
+    }
 }
 
 struct Commit {
@@ -257,7 +292,7 @@ impl INode for Commit {
         fs: &OstreeFs,
         offset: usize,
         reply: &mut fuse::ReplyDirectory,
-    ) -> Result<(), i32> {
+    ) -> Result<(), Errno> {
         self.to_tree(&fs.repo)?.readdir(fs, offset, reply)
     }
 
@@ -291,8 +326,8 @@ impl INode for Tree {
         fs: &OstreeFs,
         mut offset: usize,
         reply: &mut fuse::ReplyDirectory,
-    ) -> Result<(), i32> {
-        let dt_data = fs.repo.read_dirtree(&self.tree).map_err(|_| EIO)?;
+    ) -> Result<(), Errno> {
+        let dt_data = fs.repo.read_dirtree(&self.tree).map_err(|_| Errno(EIO))?;
         let dt = dt_data.as_dirtree();
         let mut next_offset: i64 = offset as i64 + 1;
         let dirs = dt.iter_dirs();
@@ -382,8 +417,8 @@ impl INode for Content {
         _fs: &OstreeFs,
         _offset: usize,
         _reply: &mut fuse::ReplyDirectory,
-    ) -> Result<(), i32> {
-        Err(ENOTDIR)
+    ) -> Result<(), Errno> {
+        Err(Errno(ENOTDIR))
     }
 
     fn lookup(&mut self, _fs: &OstreeFs, _name: &OsStr) -> Result<FileAttr, i32> {
@@ -482,8 +517,10 @@ impl OstreeFs {
     }
     fn get_by_inode(&self, ino: u64) -> Result<FileRef, Errno> {
         let inode = InodeNo::from_u64(ino);
-        if let Some(sd) = static_dir(inode) {
-            return Ok(FileRef::Static(sd));
+        match inode {
+            InodeNo::ROOT => return Ok(FileRef::Root(Root {})),
+            InodeNo::BY_COMMIT => return Ok(FileRef::ByCommit(ByCommit {})),
+            _ => {}
         }
         if let Some(oid) = self.files.get(&inode) {
             return Ok(FileRef::File(Content { oid: *oid }));
@@ -615,7 +652,7 @@ impl Filesystem for OstreeFs {
                 .readdir(self, offset, &mut reply)
         })() {
             Ok(_) => reply.ok(),
-            Err(x) => reply.error(x),
+            Err(x) => reply.error(x.into()),
         };
     }
     fn releasedir(
@@ -788,7 +825,6 @@ mod tests {
             // TODO: Figure out how to refer to the inode of the parent of the root directory
             //check_dir_specials(mountpoint, _tmp);
             //check_dir_specials(&PathBuf::from("/run"), &PathBuf::from("/"));
-            check_dir_specials(&mountpoint.join("refs"), mountpoint);
             check_dir_specials(&mountpoint.join("by-commit"), mountpoint);
             check_dir_specials(
                 &mountpoint.join("by-commit").join(COMMIT_OID),

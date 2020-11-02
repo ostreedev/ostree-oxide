@@ -658,7 +658,7 @@ impl Filesystem for OstreeFs {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsStr, fs::create_dir, fs::File, io::Write, process::Stdio};
+    use std::{ffi::OsStr, fs::create_dir, fs::File, io::Write, path::Path, process::Stdio};
 
     use ostree_repo::Repo;
     use tempfile::tempdir;
@@ -669,8 +669,7 @@ mod tests {
     const BARE_USER_REPO_TAR: &[u8] = include_bytes!("../../ostree-repo/testdata/bare-user.tar");
     const COMMIT_OID: &str = "247b95a821f9cca301513b1ed57224b906d7e8fe117936db82afac43acee024a";
 
-    #[test]
-    fn test_retar() {
+    fn with_fusemnt(f: impl FnOnce(&Path, &Path)) {
         // Setup
         let tmp = tempdir().unwrap();
         let mountpoint = tmp.path().join("repo");
@@ -700,45 +699,48 @@ mod tests {
             )
             .unwrap()
         };
+        f(mountpoint.as_ref(), tmp.path())
+    }
 
-        let fs_path = mountpoint.join("by-commit").join(COMMIT_OID);
-        let retar = std::process::Command::new("tar")
-            .args(&[
-                "-c",
-                "-C",
-                &fs_path.to_str().unwrap(),
-                "--sort=name",
-                "--numeric-owner",
-                "--xattrs",
-                "--format=posix",
-                "--mtime=1970-01-01 00:00Z",
-                "-v",
-                "--pax-option=exthdr.name=%d/PaxHeaders/%f,atime:=0,ctime:=0",
-                ".",
-            ])
-            .stderr(Stdio::inherit())
-            .output()
-            .unwrap()
-            .stdout;
-        if retar != FS_TAR {
-            File::create(tmp.path().join("expected.tar"))
-                .unwrap()
-                .write_all(FS_TAR)
-                .unwrap();
-            File::create(tmp.path().join("actual.tar"))
-                .unwrap()
-                .write_all(&retar)
-                .unwrap();
-            let o = std::process::Command::new("diffoscope")
+    #[test]
+    fn test_retar() {
+        with_fusemnt(|mountpoint, tmp| {
+            let fs_path = mountpoint.join("by-commit").join(COMMIT_OID);
+            let retar = std::process::Command::new("tar")
                 .args(&[
-                    tmp.path().join("expected.tar"),
-                    tmp.path().join("actual.tar"),
+                    "-c",
+                    "-C",
+                    &fs_path.to_str().unwrap(),
+                    "--sort=name",
+                    "--numeric-owner",
+                    "--xattrs",
+                    "--format=posix",
+                    "--mtime=1970-01-01 00:00Z",
+                    "-v",
+                    "--pax-option=exthdr.name=%d/PaxHeaders/%f,atime:=0,ctime:=0",
+                    ".",
                 ])
+                .stderr(Stdio::inherit())
                 .output()
-                .unwrap();
-            println!("{}", std::str::from_utf8(&*o.stdout).unwrap());
-            assert!(false);
-        }
+                .unwrap()
+                .stdout;
+            if retar != FS_TAR {
+                File::create(tmp.join("expected.tar"))
+                    .unwrap()
+                    .write_all(FS_TAR)
+                    .unwrap();
+                File::create(tmp.join("actual.tar"))
+                    .unwrap()
+                    .write_all(&retar)
+                    .unwrap();
+                let o = std::process::Command::new("diffoscope")
+                    .args(&[tmp.join("expected.tar"), tmp.join("actual.tar")])
+                    .output()
+                    .unwrap();
+                println!("{}", std::str::from_utf8(&*o.stdout).unwrap());
+                assert!(false);
+            }
+        })
     }
 }
 

@@ -1,6 +1,6 @@
 use fuse::{mount, FileAttr, FileType, Filesystem};
 use hex::FromHex;
-use libc::{c_int, EINVAL, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR};
+use libc::{c_int, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR};
 use ostree_repo::{CommitId, ContentId, DirMetaId, DirTreeId, Oid, Repo};
 use std::os::unix::ffi::OsStrExt;
 use std::{
@@ -201,6 +201,17 @@ enum FileRef {
     Commit(Commit),
     Tree(Tree),
     File(Content),
+}
+
+impl FileRef {
+    fn as_inode_mut(&mut self) -> Result<&mut dyn INode, Errno> {
+        Ok(match self {
+            FileRef::Static(x) => x,
+            FileRef::Commit(x) => x,
+            FileRef::Tree(x) => x,
+            FileRef::File(x) => x,
+        })
+    }
 }
 
 trait INode {
@@ -489,53 +500,6 @@ impl OstreeFs {
         }
         Err(Errno(ENOENT))
     }
-    fn readdir(
-        &mut self,
-        _req: &fuse::Request,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
-        reply: &mut fuse::ReplyDirectory,
-    ) -> Result<(), i32> {
-        assert!(offset >= 0);
-        let offset: usize = offset as usize;
-        match self.get_by_inode(ino)? {
-            FileRef::Static(mut d) => d.readdir(self, offset, reply),
-            FileRef::Commit(mut c) => c.readdir(self, offset, reply),
-            FileRef::Tree(mut tree) => tree.readdir(self, offset, reply),
-            FileRef::File(_) => Err(EINVAL),
-        }
-    }
-    fn getattr(&mut self, _req: &fuse::Request, ino: u64) -> Result<FileAttr, i32> {
-        match self.get_by_inode(ino)? {
-            FileRef::Static(mut sd) => sd.getattr(self),
-            FileRef::Commit(mut c) => c.getattr(self),
-            FileRef::Tree(mut tree) => tree.getattr(self),
-            FileRef::File(mut f) => f.getattr(self),
-        }
-    }
-    fn lookup(&mut self, _req: &fuse::Request, parent: u64, name: &OsStr) -> Result<FileAttr, i32> {
-        match self.get_by_inode(parent)? {
-            FileRef::Static(mut sd) => sd.lookup(self, name),
-            FileRef::Commit(mut c) => c.lookup(self, name),
-            FileRef::Tree(mut tree) => tree.lookup(self, name),
-            FileRef::File(_) => return Err(EINVAL),
-        }
-    }
-    fn read(
-        &mut self,
-        _req: &fuse::Request,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
-        size: u32,
-        reply: &mut Vec<u8>,
-    ) -> Result<(), std::io::Error> {
-        match self.get_by_inode(ino)? {
-            FileRef::File(mut f) => f.read(self, offset, size, reply),
-            _ => Err(std::io::Error::from_raw_os_error(EISDIR)),
-        }
-    }
 }
 
 impl Filesystem for OstreeFs {
@@ -547,17 +511,21 @@ impl Filesystem for OstreeFs {
     }
     fn destroy(&mut self, _req: &fuse::Request) {}
     fn forget(&mut self, _req: &fuse::Request, _ino: u64, _nlookup: u64) {}
-    fn getattr(&mut self, req: &fuse::Request, ino: u64, reply: fuse::ReplyAttr) {
+    fn getattr(&mut self, _req: &fuse::Request, ino: u64, reply: fuse::ReplyAttr) {
         if TRACING {
             eprintln!("getattr(ino: {:?})", ino);
         }
-        match self.getattr(req, ino) {
+        match (|| self.get_by_inode(ino)?.as_inode_mut()?.getattr(self))() {
             Ok(x) => reply.attr(&FOREVER, &x),
             Err(errno) => reply.error(errno),
         }
     }
-    fn lookup(&mut self, req: &fuse::Request, parent: u64, name: &OsStr, reply: fuse::ReplyEntry) {
-        match self.lookup(req, parent, name) {
+    fn lookup(&mut self, _req: &fuse::Request, parent: u64, name: &OsStr, reply: fuse::ReplyEntry) {
+        match (|| {
+            self.get_by_inode(parent)?
+                .as_inode_mut()?
+                .lookup(self, name)
+        })() {
             Ok(attr) => reply.entry(&FOREVER, &attr, 0),
             Err(errno) => reply.error(errno),
         };
@@ -587,9 +555,9 @@ impl Filesystem for OstreeFs {
     }
     fn read(
         &mut self,
-        req: &fuse::Request,
+        _req: &fuse::Request,
         ino: u64,
-        fh: u64,
+        _fh: u64,
         offset: i64,
         size: u32,
         reply: fuse::ReplyData,
@@ -601,7 +569,11 @@ impl Filesystem for OstreeFs {
             );
         }
         let mut out = Vec::new();
-        match self.read(req, ino, fh, offset, size, &mut out) {
+        match (|| {
+            self.get_by_inode(ino)?
+                .as_inode_mut()?
+                .read(self, offset, size, &mut out)
+        })() {
             Ok(()) => reply.data(out.as_ref()),
             Err(err) => reply.error(err.raw_os_error().unwrap_or(EIO)),
         }
@@ -626,16 +598,22 @@ impl Filesystem for OstreeFs {
     }
     fn readdir(
         &mut self,
-        req: &fuse::Request,
+        _req: &fuse::Request,
         ino: u64,
-        fh: u64,
+        _fh: u64,
         offset: i64,
         mut reply: fuse::ReplyDirectory,
     ) {
         if TRACING {
             eprintln!("readdir(ino: {:?}, offset: {:?})", ino, offset);
         }
-        match self.readdir(req, ino, fh, offset, &mut reply) {
+        assert!(offset >= 0);
+        let offset: usize = offset as usize;
+        match (|| {
+            self.get_by_inode(ino)?
+                .as_inode_mut()?
+                .readdir(self, offset, &mut reply)
+        })() {
             Ok(_) => reply.ok(),
             Err(x) => reply.error(x),
         };

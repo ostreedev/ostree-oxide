@@ -101,7 +101,7 @@ impl INode for &'static StaticDir {
         }
         if self.attr.ino == InodeNo::BY_COMMIT.as_u64() {
             if let Ok(oid) = Oid::from_hex(name.as_bytes()) {
-                return fs.commit_to_dir(&CommitId(oid))?.getattr(fs);
+                return Commit { oid: CommitId(oid) }.getattr(fs);
             } else {
                 eprintln!("Invalid commit oid: {:?}", name);
             }
@@ -198,7 +198,7 @@ const fn dir_attr(ino: InodeNo) -> FileAttr {
 
 enum FileRef {
     Static(&'static StaticDir),
-    Commit(CommitId),
+    Commit(Commit),
     Tree(Tree),
     File(Content),
 }
@@ -219,6 +219,54 @@ trait INode {
         size: u32,
         reply: &mut Vec<u8>,
     ) -> Result<(), std::io::Error>;
+}
+
+struct Commit {
+    oid: CommitId,
+}
+impl Commit {
+    fn to_tree(&self, repo: &Repo) -> Result<Tree, Errno> {
+        let buf = match repo.read_commit(&self.oid) {
+            Ok(x) => x,
+            Err(err) => {
+                eprintln!("Error loading commit {:?}: {:?}", self.oid, err);
+                return Err(Errno(ENOENT));
+            }
+        };
+        let commit = buf.as_commit();
+        Ok(Tree {
+            meta: *commit.dirmeta,
+            tree: *commit.dirtree,
+        })
+    }
+}
+impl INode for Commit {
+    fn readdir(
+        &mut self,
+        fs: &OstreeFs,
+        offset: usize,
+        reply: &mut fuse::ReplyDirectory,
+    ) -> Result<(), i32> {
+        self.to_tree(&fs.repo)?.readdir(fs, offset, reply)
+    }
+
+    fn getattr(&mut self, fs: &OstreeFs) -> Result<FileAttr, i32> {
+        self.to_tree(&fs.repo)?.getattr(fs)
+    }
+
+    fn lookup(&mut self, fs: &OstreeFs, name: &OsStr) -> Result<FileAttr, i32> {
+        self.to_tree(&fs.repo)?.lookup(fs, name)
+    }
+
+    fn read(
+        &mut self,
+        fs: &OstreeFs,
+        offset: i64,
+        size: u32,
+        reply: &mut Vec<u8>,
+    ) -> Result<(), std::io::Error> {
+        self.to_tree(&fs.repo)?.read(fs, offset, size, reply)
+    }
 }
 
 struct Tree {
@@ -437,7 +485,7 @@ impl OstreeFs {
             }));
         }
         if let Some(commit_id) = self.commits.get(&inode) {
-            return Ok(FileRef::Commit(*commit_id));
+            return Ok(FileRef::Commit(Commit { oid: *commit_id }));
         }
         Err(Errno(ENOENT))
     }
@@ -453,7 +501,7 @@ impl OstreeFs {
         let offset: usize = offset as usize;
         match self.get_by_inode(ino)? {
             FileRef::Static(mut d) => d.readdir(self, offset, reply),
-            FileRef::Commit(oid) => self.commit_to_dir(&oid)?.readdir(self, offset, reply),
+            FileRef::Commit(mut c) => c.readdir(self, offset, reply),
             FileRef::Tree(mut tree) => tree.readdir(self, offset, reply),
             FileRef::File(_) => Err(EINVAL),
         }
@@ -461,29 +509,15 @@ impl OstreeFs {
     fn getattr(&mut self, _req: &fuse::Request, ino: u64) -> Result<FileAttr, i32> {
         match self.get_by_inode(ino)? {
             FileRef::Static(mut sd) => sd.getattr(self),
-            FileRef::Commit(oid) => self.commit_to_dir(&oid)?.getattr(self),
+            FileRef::Commit(mut c) => c.getattr(self),
             FileRef::Tree(mut tree) => tree.getattr(self),
             FileRef::File(mut f) => f.getattr(self),
         }
     }
-    fn commit_to_dir(&self, oid: &CommitId) -> Result<Tree, i32> {
-        let buf = match self.repo.read_commit(&oid) {
-            Ok(x) => x,
-            Err(err) => {
-                eprintln!("Error loading commit {:?}: {:?}", oid, err);
-                return Err(ENOENT);
-            }
-        };
-        let commit = buf.as_commit();
-        Ok(Tree {
-            meta: *commit.dirmeta,
-            tree: *commit.dirtree,
-        })
-    }
     fn lookup(&mut self, _req: &fuse::Request, parent: u64, name: &OsStr) -> Result<FileAttr, i32> {
         match self.get_by_inode(parent)? {
             FileRef::Static(mut sd) => sd.lookup(self, name),
-            FileRef::Commit(oid) => self.commit_to_dir(&oid)?.lookup(self, name),
+            FileRef::Commit(mut c) => c.lookup(self, name),
             FileRef::Tree(mut tree) => tree.lookup(self, name),
             FileRef::File(_) => return Err(EINVAL),
         }

@@ -658,8 +658,18 @@ impl Filesystem for OstreeFs {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsStr, fs::create_dir, fs::File, io::Write, path::Path, process::Stdio};
+    use std::{
+        ffi::{CStr, OsStr},
+        fs::create_dir,
+        fs::metadata,
+        fs::File,
+        io::Write,
+        os::linux::fs::MetadataExt,
+        path::Path,
+        process::Stdio,
+    };
 
+    use nix::dir::Entry;
     use ostree_repo::Repo;
     use tempfile::tempdir;
 
@@ -740,6 +750,50 @@ mod tests {
                 println!("{}", std::str::from_utf8(&*o.stdout).unwrap());
                 assert!(false);
             }
+        })
+    }
+    fn check_dir_specials(path: &Path, parent: &Path) {
+        let ino = metadata(path).unwrap().st_ino();
+        let parent_ino = metadata(parent).unwrap().st_ino();
+        assert_eq!(metadata(path.join(".")).unwrap().st_ino(), ino);
+        assert_eq!(metadata(path.join("..")).unwrap().st_ino(), parent_ino);
+
+        let mut d = nix::dir::Dir::open(
+            path,
+            nix::fcntl::OFlag::O_DIRECTORY,
+            nix::sys::stat::Mode::S_IXUSR,
+        )
+        .unwrap();
+        let l: Result<Vec<Entry>, _> = d.iter().collect();
+        let l = l.unwrap();
+        let s_dot = CStr::from_bytes_with_nul(b".\0").unwrap();
+        let s_dotdot = CStr::from_bytes_with_nul(b"..\0").unwrap();
+        let dot = l
+            .iter()
+            .filter(|x| x.file_name() == s_dot)
+            .next()
+            .expect("Expected . entry in directory");
+        let dotdot = l
+            .iter()
+            .filter(|x| x.file_name() == s_dotdot)
+            .next()
+            .expect("Expected .. entry in directory");
+        assert_eq!(dot.ino(), ino);
+        assert_eq!(dotdot.ino(), parent_ino);
+    }
+
+    #[test]
+    fn test_specials_dirs() {
+        with_fusemnt(|mountpoint, _tmp| {
+            // TODO: Figure out how to refer to the inode of the parent of the root directory
+            //check_dir_specials(mountpoint, _tmp);
+            //check_dir_specials(&PathBuf::from("/run"), &PathBuf::from("/"));
+            check_dir_specials(&mountpoint.join("refs"), mountpoint);
+            check_dir_specials(&mountpoint.join("by-commit"), mountpoint);
+            check_dir_specials(
+                &mountpoint.join("by-commit").join(COMMIT_OID),
+                &mountpoint.join("by-commit"),
+            );
         })
     }
 }

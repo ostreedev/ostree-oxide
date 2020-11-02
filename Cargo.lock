@@ -130,6 +130,7 @@ dependencies = [
  "gvariant",
  "hex",
  "libc",
+ "nix",
  "ostree-repo",
  "rand",
  "tar",

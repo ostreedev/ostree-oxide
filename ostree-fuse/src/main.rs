@@ -1,6 +1,6 @@
 use fuse::{mount, FileAttr, FileType, Filesystem};
 use hex::FromHex;
-use libc::{c_int, EINVAL, EIO, ENOENT, ENOSYS};
+use libc::{c_int, EINVAL, EIO, EISDIR, ENOENT, ENOSYS};
 use ostree_repo::{CommitId, ContentId, DirMetaId, DirTreeId, Oid, Repo};
 use std::os::unix::ffi::OsStrExt;
 use std::{
@@ -142,8 +142,123 @@ const fn dir_attr(ino: InodeNo) -> FileAttr {
 enum FileRef {
     Static(&'static StaticDir),
     Commit(CommitId),
-    Tree(DirMetaId, DirTreeId),
+    Tree(Tree),
     File(ContentId),
+}
+
+trait INode {
+    fn readdir(
+        &mut self,
+        fs: &OstreeFs,
+        offset: usize,
+        reply: &mut fuse::ReplyDirectory,
+    ) -> Result<(), i32>;
+    fn getattr(&mut self, fs: &OstreeFs) -> Result<FileAttr, i32>;
+    fn lookup(&mut self, fs: &OstreeFs, name: &OsStr) -> Result<FileAttr, i32>;
+    fn read(
+        &mut self,
+        fs: &OstreeFs,
+        _req: &fuse::Request,
+        ino: u64,
+        offset: i64,
+        size: u32,
+        reply: &mut Vec<u8>,
+    ) -> Result<(), std::io::Error>;
+}
+
+struct Tree {
+    meta: DirMetaId,
+    tree: DirTreeId,
+}
+
+impl INode for Tree {
+    fn readdir(
+        &mut self,
+        fs: &OstreeFs,
+        mut offset: usize,
+        reply: &mut fuse::ReplyDirectory,
+    ) -> Result<(), i32> {
+        let dt_data = fs.repo.read_dirtree(&self.tree).map_err(|_| EIO)?;
+        let dt = dt_data.as_dirtree();
+        let mut next_offset: i64 = offset as i64 + 1;
+        let dirs = dt.iter_dirs();
+        if offset >= dirs.len() {
+            offset -= dirs.len();
+        } else {
+            for dir in dirs.skip(offset) {
+                let sub_ino = InodeNo::from_dir_oid(dir.dirmeta_id, dir.dirtree_id);
+                offset = offset.saturating_sub(1);
+                if reply.add(sub_ino.as_u64(), next_offset, FileType::Directory, dir.name) {
+                    return Ok(());
+                }
+                next_offset += 1;
+            }
+        }
+        for file in dt.iter_files().skip(offset) {
+            let sub_ino = InodeNo::from_file_id(file.oid);
+            if reply.add(
+                sub_ino.as_u64(),
+                next_offset,
+                FileType::RegularFile,
+                file.name,
+            ) {
+                return Ok(());
+            }
+            next_offset += 1;
+        }
+        Ok(())
+    }
+
+    fn getattr(&mut self, fs: &OstreeFs) -> Result<FileAttr, i32> {
+        let meta = fs.repo.read_dirmeta(&self.meta).map_err(|_| EIO)?;
+        Ok(FileAttr {
+            ino: InodeNo::from_dir_oid(&self.meta, &self.tree).as_u64(),
+            size: 0,
+            blocks: 0,
+            atime: UNIX_EPOCH,
+            mtime: UNIX_EPOCH,
+            ctime: UNIX_EPOCH,
+            crtime: UNIX_EPOCH,
+            kind: FileType::Directory,
+            perm: (meta.mode & 0o7777) as u16,
+            nlink: 1,
+            uid: meta.uid,
+            gid: meta.gid,
+            rdev: 0,
+            flags: 0,
+        })
+    }
+
+    fn lookup(&mut self, fs: &OstreeFs, name: &OsStr) -> Result<FileAttr, i32> {
+        let dt_data = fs.repo.read_dirtree(&self.tree).map_err(|_| ENOENT)?;
+        let dt = dt_data.as_dirtree();
+        for de in dt.iter_dirs() {
+            if de.name == name {
+                return Tree {
+                    meta: *de.dirmeta_id,
+                    tree: *de.dirtree_id,
+                }
+                .getattr(fs);
+            }
+        }
+        for fe in dt.iter_files() {
+            if fe.name == name {
+                return fs.file_getattr(&fe.oid);
+            }
+        }
+        Err(ENOENT)
+    }
+    fn read(
+        &mut self,
+        _fs: &OstreeFs,
+        _req: &fuse::Request,
+        _ino: u64,
+        _offset: i64,
+        _size: u32,
+        _reply: &mut Vec<u8>,
+    ) -> Result<(), std::io::Error> {
+        Err(std::io::Error::from_raw_os_error(EISDIR))
+    }
 }
 
 struct OstreeFs {
@@ -197,10 +312,11 @@ impl OstreeFs {
             return Ok(FileRef::File(*oid));
         }
         let (dm, dt) = inode.to_dir_sid();
-        if let (Some(dirmeta_oid), Some(dirtree_oid)) =
-            (self.dirmetas.get(&dm), self.dirtrees.get(&dt))
-        {
-            return Ok(FileRef::Tree(*dirmeta_oid, *dirtree_oid));
+        if let (Some(meta), Some(tree)) = (self.dirmetas.get(&dm), self.dirtrees.get(&dt)) {
+            return Ok(FileRef::Tree(Tree {
+                meta: *meta,
+                tree: *tree,
+            }));
         }
         if let Some(commit_id) = self.commits.get(&inode) {
             return Ok(FileRef::Commit(*commit_id));
@@ -224,57 +340,16 @@ impl OstreeFs {
                 }
                 Ok(())
             }
-            FileRef::Commit(oid) => {
-                self.readdir_dirtree(&self.commit_to_dir(&oid)?.1, offset, reply)
-            }
-            FileRef::Tree(_, dt) => self.readdir_dirtree(&dt, offset, reply),
+            FileRef::Commit(oid) => self.commit_to_dir(&oid)?.readdir(self, offset, reply),
+            FileRef::Tree(mut tree) => tree.readdir(self, offset, reply),
             FileRef::File(_) => Err(EINVAL),
         }
-    }
-    fn readdir_dirtree(
-        &self,
-        dt: &DirTreeId,
-        mut offset: usize,
-        reply: &mut fuse::ReplyDirectory,
-    ) -> Result<(), i32> {
-        let dt_data = self.repo.read_dirtree(dt).map_err(|_| EIO)?;
-        let dt = dt_data.as_dirtree();
-        let mut next_offset: i64 = offset as i64 + 1;
-        let dirs = dt.iter_dirs();
-        if offset >= dirs.len() {
-            offset -= dirs.len();
-        } else {
-            for dir in dirs.skip(offset) {
-                let sub_ino = InodeNo::from_dir_oid(dir.dirmeta_id, dir.dirtree_id);
-                offset = offset.saturating_sub(1);
-                if reply.add(sub_ino.as_u64(), next_offset, FileType::Directory, dir.name) {
-                    return Ok(());
-                }
-                next_offset += 1;
-            }
-        }
-        for file in dt.iter_files().skip(offset) {
-            let sub_ino = InodeNo::from_file_id(file.oid);
-            if reply.add(
-                sub_ino.as_u64(),
-                next_offset,
-                FileType::RegularFile,
-                file.name,
-            ) {
-                return Ok(());
-            }
-            next_offset += 1;
-        }
-        Ok(())
     }
     fn getattr(&mut self, _req: &fuse::Request, ino: u64) -> Result<FileAttr, i32> {
         match self.get_by_inode(ino)? {
             FileRef::Static(sd) => Ok(sd.attr),
-            FileRef::Commit(oid) => {
-                let (dirmeta_id, dirtree_id) = self.commit_to_dir(&oid)?;
-                self.dir_getattr(&dirmeta_id, &dirtree_id)
-            }
-            FileRef::Tree(dirmeta_id, dirtree_id) => self.dir_getattr(&dirmeta_id, &dirtree_id),
+            FileRef::Commit(oid) => self.commit_to_dir(&oid)?.getattr(self),
+            FileRef::Tree(mut tree) => tree.getattr(self),
             FileRef::File(oid) => self.file_getattr(&oid),
         }
     }
@@ -310,26 +385,7 @@ impl OstreeFs {
             flags: 0,
         })
     }
-    fn dir_getattr(&self, dirmeta_id: &DirMetaId, dirtree_id: &DirTreeId) -> Result<FileAttr, i32> {
-        let meta = self.repo.read_dirmeta(&dirmeta_id).map_err(|_| EIO)?;
-        Ok(FileAttr {
-            ino: InodeNo::from_dir_oid(dirmeta_id, dirtree_id).as_u64(),
-            size: 0,
-            blocks: 0,
-            atime: UNIX_EPOCH,
-            mtime: UNIX_EPOCH,
-            ctime: UNIX_EPOCH,
-            crtime: UNIX_EPOCH,
-            kind: FileType::Directory,
-            perm: (meta.mode & 0o7777) as u16,
-            nlink: 1,
-            uid: meta.uid,
-            gid: meta.gid,
-            rdev: 0,
-            flags: 0,
-        })
-    }
-    fn commit_to_dir(&self, oid: &CommitId) -> Result<(DirMetaId, DirTreeId), i32> {
+    fn commit_to_dir(&self, oid: &CommitId) -> Result<Tree, i32> {
         let buf = match self.repo.read_commit(&oid) {
             Ok(x) => x,
             Err(err) => {
@@ -338,11 +394,13 @@ impl OstreeFs {
             }
         };
         let commit = buf.as_commit();
-        Ok((*commit.dirmeta, *commit.dirtree))
+        Ok(Tree {
+            meta: *commit.dirmeta,
+            tree: *commit.dirtree,
+        })
     }
     fn commit_getattr(&self, oid: &CommitId) -> Result<FileAttr, i32> {
-        let (dirmeta, dirtree) = self.commit_to_dir(oid)?;
-        self.dir_getattr(&dirmeta, &dirtree)
+        self.commit_to_dir(oid)?.getattr(self)
     }
     fn lookup(&mut self, _req: &fuse::Request, parent: u64, name: &OsStr) -> Result<FileAttr, i32> {
         match self.get_by_inode(parent)? {
@@ -361,25 +419,10 @@ impl OstreeFs {
                 }
                 return Err(ENOENT);
             }
-            FileRef::Commit(oid) => self.dirtree_lookup(&self.commit_to_dir(&oid)?.1, name),
-            FileRef::Tree(_, dtid) => self.dirtree_lookup(&dtid, name),
+            FileRef::Commit(oid) => self.commit_to_dir(&oid)?.lookup(self, name),
+            FileRef::Tree(mut tree) => tree.lookup(self, name),
             FileRef::File(_) => return Err(EINVAL),
         }
-    }
-    fn dirtree_lookup(&self, dtid: &DirTreeId, name: &OsStr) -> Result<FileAttr, i32> {
-        let dt_data = self.repo.read_dirtree(&dtid).map_err(|_| ENOENT)?;
-        let dt = dt_data.as_dirtree();
-        for de in dt.iter_dirs() {
-            if de.name == name {
-                return self.dir_getattr(&de.dirmeta_id, &de.dirtree_id);
-            }
-        }
-        for fe in dt.iter_files() {
-            if fe.name == name {
-                return self.file_getattr(&fe.oid);
-            }
-        }
-        Err(ENOENT)
     }
     fn read(
         &mut self,

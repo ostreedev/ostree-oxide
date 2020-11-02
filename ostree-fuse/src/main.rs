@@ -1,6 +1,6 @@
 use fuse::{mount, FileAttr, FileType, Filesystem};
 use hex::FromHex;
-use libc::{c_int, EINVAL, EIO, EISDIR, ENOENT, ENOSYS};
+use libc::{c_int, EINVAL, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR};
 use ostree_repo::{CommitId, ContentId, DirMetaId, DirTreeId, Oid, Repo};
 use std::os::unix::ffi::OsStrExt;
 use std::{
@@ -20,6 +20,19 @@ const FOREVER: Timespec = Timespec {
     nsec: 0,
 };
 const TRACING: bool = false;
+
+#[derive(Copy, Clone)]
+struct Errno(c_int);
+impl From<Errno> for i32 {
+    fn from(x: Errno) -> Self {
+        x.0
+    }
+}
+impl From<Errno> for std::io::Error {
+    fn from(x: Errno) -> Self {
+        std::io::Error::from_raw_os_error(x.0)
+    }
+}
 
 struct StaticDir {
     attr: FileAttr,
@@ -143,7 +156,7 @@ enum FileRef {
     Static(&'static StaticDir),
     Commit(CommitId),
     Tree(Tree),
-    File(ContentId),
+    File(Content),
 }
 
 trait INode {
@@ -158,8 +171,6 @@ trait INode {
     fn read(
         &mut self,
         fs: &OstreeFs,
-        _req: &fuse::Request,
-        ino: u64,
         offset: i64,
         size: u32,
         reply: &mut Vec<u8>,
@@ -243,7 +254,7 @@ impl INode for Tree {
         }
         for fe in dt.iter_files() {
             if fe.name == name {
-                return fs.file_getattr(&fe.oid);
+                return Content { oid: *fe.oid }.getattr(fs);
             }
         }
         Err(ENOENT)
@@ -251,13 +262,76 @@ impl INode for Tree {
     fn read(
         &mut self,
         _fs: &OstreeFs,
-        _req: &fuse::Request,
-        _ino: u64,
         _offset: i64,
         _size: u32,
         _reply: &mut Vec<u8>,
     ) -> Result<(), std::io::Error> {
         Err(std::io::Error::from_raw_os_error(EISDIR))
+    }
+}
+
+struct Content {
+    oid: ContentId,
+}
+impl INode for Content {
+    fn readdir(
+        &mut self,
+        _fs: &OstreeFs,
+        _offset: usize,
+        _reply: &mut fuse::ReplyDirectory,
+    ) -> Result<(), i32> {
+        Err(ENOTDIR)
+    }
+
+    fn lookup(&mut self, _fs: &OstreeFs, _name: &OsStr) -> Result<FileAttr, i32> {
+        Err(ENOTDIR)
+    }
+
+    fn getattr(&mut self, fs: &OstreeFs) -> Result<FileAttr, i32> {
+        let meta = fs.repo.read_meta(&self.oid).map_err(|_| EIO)?;
+        let kind = match meta.mode & libc::S_IFMT {
+            libc::S_IFBLK => FileType::BlockDevice,
+            libc::S_IFCHR => FileType::CharDevice,
+            libc::S_IFDIR => FileType::Directory,
+            libc::S_IFIFO => FileType::NamedPipe,
+            libc::S_IFREG => FileType::RegularFile,
+            libc::S_IFSOCK => FileType::Socket,
+            libc::S_IFLNK => FileType::Symlink,
+            _ => {
+                eprintln!("Invalid metadata on file");
+                return Err(EIO);
+            }
+        };
+        Ok(FileAttr {
+            ino: InodeNo::from_file_id(&self.oid).as_u64(),
+            size: meta.size,
+            blocks: (meta.size + 511) / 512,
+            atime: UNIX_EPOCH,
+            mtime: UNIX_EPOCH,
+            ctime: UNIX_EPOCH,
+            crtime: UNIX_EPOCH,
+            kind,
+            perm: (meta.mode & 0o7777) as u16,
+            nlink: 1,
+            uid: meta.uid,
+            gid: meta.gid,
+            rdev: 0,
+            flags: 0,
+        })
+    }
+
+    fn read(
+        &mut self,
+        fs: &OstreeFs,
+        offset: i64,
+        size: u32,
+        reply: &mut Vec<u8>,
+    ) -> Result<(), std::io::Error> {
+        let mut f = fs.repo.open_object(&self.oid.into())?;
+        f.seek(SeekFrom::Start(offset.try_into().unwrap()))?;
+        reply.reserve(size as usize);
+        f.take(size as u64).read_to_end(reply)?;
+        Ok(())
     }
 }
 
@@ -303,13 +377,13 @@ impl OstreeFs {
             dirmetas,
         })
     }
-    fn get_by_inode(&self, ino: u64) -> Result<FileRef, i32> {
+    fn get_by_inode(&self, ino: u64) -> Result<FileRef, Errno> {
         let inode = InodeNo::from_u64(ino);
         if let Some(sd) = static_dir(inode) {
             return Ok(FileRef::Static(sd));
         }
         if let Some(oid) = self.files.get(&inode) {
-            return Ok(FileRef::File(*oid));
+            return Ok(FileRef::File(Content { oid: *oid }));
         }
         let (dm, dt) = inode.to_dir_sid();
         if let (Some(meta), Some(tree)) = (self.dirmetas.get(&dm), self.dirtrees.get(&dt)) {
@@ -321,7 +395,7 @@ impl OstreeFs {
         if let Some(commit_id) = self.commits.get(&inode) {
             return Ok(FileRef::Commit(*commit_id));
         }
-        Err(ENOENT)
+        Err(Errno(ENOENT))
     }
     fn readdir(
         &mut self,
@@ -350,40 +424,8 @@ impl OstreeFs {
             FileRef::Static(sd) => Ok(sd.attr),
             FileRef::Commit(oid) => self.commit_to_dir(&oid)?.getattr(self),
             FileRef::Tree(mut tree) => tree.getattr(self),
-            FileRef::File(oid) => self.file_getattr(&oid),
+            FileRef::File(mut f) => f.getattr(self),
         }
-    }
-    fn file_getattr(&self, oid: &ContentId) -> Result<FileAttr, i32> {
-        let meta = self.repo.read_meta(oid).map_err(|_| EIO)?;
-        let kind = match meta.mode & libc::S_IFMT {
-            libc::S_IFBLK => FileType::BlockDevice,
-            libc::S_IFCHR => FileType::CharDevice,
-            libc::S_IFDIR => FileType::Directory,
-            libc::S_IFIFO => FileType::NamedPipe,
-            libc::S_IFREG => FileType::RegularFile,
-            libc::S_IFSOCK => FileType::Socket,
-            libc::S_IFLNK => FileType::Symlink,
-            _ => {
-                eprintln!("Invalid metadata on file");
-                return Err(EIO);
-            }
-        };
-        Ok(FileAttr {
-            ino: InodeNo::from_file_id(oid).as_u64(),
-            size: meta.size,
-            blocks: (meta.size + 511) / 512,
-            atime: UNIX_EPOCH,
-            mtime: UNIX_EPOCH,
-            ctime: UNIX_EPOCH,
-            crtime: UNIX_EPOCH,
-            kind,
-            perm: (meta.mode & 0o7777) as u16,
-            nlink: 1,
-            uid: meta.uid,
-            gid: meta.gid,
-            rdev: 0,
-            flags: 0,
-        })
     }
     fn commit_to_dir(&self, oid: &CommitId) -> Result<Tree, i32> {
         let buf = match self.repo.read_commit(&oid) {
@@ -433,13 +475,10 @@ impl OstreeFs {
         size: u32,
         reply: &mut Vec<u8>,
     ) -> Result<(), std::io::Error> {
-        let ino = InodeNo::from_u64(ino);
-        let oid = self.files.get(&ino).ok_or(std::io::ErrorKind::NotFound)?;
-        let mut f = self.repo.open_object(&(*oid).into())?;
-        f.seek(SeekFrom::Start(offset.try_into().unwrap()))?;
-        reply.reserve(size as usize);
-        f.take(size as u64).read_to_end(reply)?;
-        Ok(())
+        match self.get_by_inode(ino)? {
+            FileRef::File(mut f) => f.read(self, offset, size, reply),
+            _ => Err(std::io::Error::from_raw_os_error(EISDIR)),
+        }
     }
 }
 

@@ -204,6 +204,18 @@ impl Repo {
         let data = self.read_object(&(*oid).into())?;
         Ok(Meta::from_data(&*data, 0))
     }
+    pub fn read_content_xattrs(&self, oid: &ContentId) -> Result<Xattrs, Box<dyn Error>> {
+        let file = self.open_object(&ObjId::Content(*oid))?;
+        let meta = file
+            .get_xattr("user.ostreemeta")?
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+        let meta = copy_to_align(&meta).into_owned();
+        Ok(Xattrs::from_data(meta))
+    }
+    pub fn read_dirmeta_xattrs(&self, oid: &DirMetaId) -> Result<Xattrs, Box<dyn Error>> {
+        let data = self.read_object(&(*oid).into())?;
+        Ok(Xattrs::from_data(data))
+    }
     pub fn for_each_object(&self, mut cb: impl FnMut(&ObjId)) -> Result<(), Box<dyn Error>> {
         let mut tmp = vec![];
         for x in 0u8..=255 {
@@ -391,6 +403,26 @@ pub struct Meta {
     pub gid: u32,
     pub mode: u32,
     pub size: u64,
+}
+pub struct Xattrs(Box<AlignedSlice<A4>>);
+impl Xattrs {
+    fn from_data(data: Box<AlignedSlice<A4>>) -> Xattrs {
+        Xattrs(data)
+    }
+    pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
+        let (_, _, _, xattrs) = gv!("(uuua(ayay))").cast(&self.0).to_tuple();
+        for x in xattrs {
+            let (k, v) = x.to_tuple();
+            if k == key {
+                return Some(v);
+            }
+        }
+        None
+    }
+    pub fn iter_keys(&self) -> impl Iterator<Item = &[u8]> {
+        let (_, _, _, xattrs) = gv!("(uuua(ayay))").cast(&self.0).to_tuple();
+        xattrs.iter().map(|x| x.to_tuple().0)
+    }
 }
 
 impl Meta {

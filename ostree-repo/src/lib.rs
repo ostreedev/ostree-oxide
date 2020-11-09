@@ -28,6 +28,12 @@ impl Oid {
         let x: &[u8; 32] = s.try_into().ok()?;
         Some(Self::ref_cast(x))
     }
+    fn from_prefix_suffix(prefix: u8, suffix: &[u8; 31]) -> Oid {
+        let mut out = Oid::ZERO;
+        out.0[0] = prefix;
+        out.0[1..].copy_from_slice(suffix);
+        out
+    }
 }
 impl Display for Oid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -217,7 +223,6 @@ impl Repo {
         Ok(Xattrs::from_data(data))
     }
     pub fn for_each_object(&self, mut cb: impl FnMut(&ObjId)) -> Result<(), Box<dyn Error>> {
-        let mut tmp = vec![];
         for x in 0u8..=255 {
             let path: PathBuf = ["objects", &format!("{:02x}", x)].iter().collect();
             let d = Dir::openat(
@@ -256,10 +261,7 @@ impl Repo {
                     );
                     continue;
                 }
-                tmp.clear();
-                write!(&mut tmp, "{:02x}", x).unwrap();
-                tmp.extend_from_slice(h);
-                let oid = match Oid::from_hex(&tmp) {
+                let oid_suffix = match <[u8;31]>::from_hex(h) {
                     Ok(x) => x,
                     Err(err) => {
                         eprintln!(
@@ -270,6 +272,7 @@ impl Repo {
                         continue;
                     }
                 };
+                let oid = Oid::from_prefix_suffix(x, &oid_suffix);
                 let objid = match ext {
                     b".commit" => ObjId::Commit(CommitId(oid)),
                     b".dirmeta" => ObjId::DirMeta(DirMetaId(oid)),

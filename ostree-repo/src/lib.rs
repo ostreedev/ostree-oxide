@@ -57,14 +57,11 @@ impl ToHex for Oid {
     }
 }
 
-static DEFAULT_OID: [u8; 32] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-];
 impl AsRef<Oid> for [u8] {
     fn as_ref(&self) -> &Oid {
         match self.try_into() {
             Ok(a) => Oid::ref_cast(a),
-            Err(_) => Oid::ref_cast(&DEFAULT_OID),
+            Err(_) => &Oid::ZERO,
         }
     }
 }

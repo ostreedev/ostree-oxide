@@ -1,7 +1,7 @@
 use fuse::{mount, FileAttr, FileType, Filesystem};
 use hex::FromHex;
 use libc::{c_int, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR};
-use ostree_repo::{CommitId, ContentId, DirMetaId, DirTreeId, Oid, Repo};
+use ostree_repo::{CommitId, ContentId, DirMetaId, DirTreeId, ObjId, Oid, Repo};
 use std::os::unix::ffi::OsStrExt;
 use std::{
     collections::HashMap,
@@ -31,6 +31,14 @@ impl From<Errno> for i32 {
 impl From<Errno> for std::io::Error {
     fn from(x: Errno) -> Self {
         std::io::Error::from_raw_os_error(x.0)
+    }
+}
+impl From<std::io::Error> for Errno {
+    fn from(x: std::io::Error) -> Self {
+        match x.raw_os_error() {
+            Some(errno) => Errno(errno),
+            None => Errno(EIO),
+        }
     }
 }
 
@@ -136,22 +144,8 @@ fn iter_readdir<'a, It: Iterator<Item = Result<(InodeNo, FileType, &'a OsStr), E
     mut offset: usize,
     reply: &mut fuse::ReplyDirectory,
 ) -> Result<(), Errno> {
-    if offset == 0 {
-        offset += 1;
-        if reply.add(ino.as_u64(), offset as i64, FileType::Directory, ".") {
-            return Ok(());
-        }
-    }
-    if offset == 1 {
-        offset += 1;
-        if reply.add(
-            parent_ino.as_u64(),
-            offset as i64,
-            FileType::Directory,
-            "..",
-        ) {
-            return Ok(());
-        }
+    if write_special_dirents(ino, parent_ino, &mut offset, reply) {
+        return Ok(());
     }
     for x in it.skip(offset - 2) {
         let (ino, kind, name) = x?;
@@ -161,6 +155,32 @@ fn iter_readdir<'a, It: Iterator<Item = Result<(InodeNo, FileType, &'a OsStr), E
         offset += 1
     }
     Ok(())
+}
+
+fn write_special_dirents(
+    ino: InodeNo,
+    parent_ino: InodeNo,
+    offset: &mut usize,
+    reply: &mut fuse::ReplyDirectory,
+) -> bool {
+    if *offset == 0 {
+        *offset += 1;
+        if reply.add(ino.as_u64(), *offset as i64, FileType::Directory, ".") {
+            return true;
+        }
+    }
+    if *offset == 1 {
+        *offset += 1;
+        if reply.add(
+            parent_ino.as_u64(),
+            *offset as i64,
+            FileType::Directory,
+            "..",
+        ) {
+            return true;
+        }
+    }
+    false
 }
 
 trait INode {
@@ -230,17 +250,27 @@ struct ByCommit {}
 impl INode for ByCommit {
     fn readdir(
         &mut self,
-        _fs: &OstreeFs,
-        offset: usize,
+        fs: &OstreeFs,
+        mut offset: usize,
         reply: &mut fuse::ReplyDirectory,
     ) -> Result<(), Errno> {
-        iter_readdir(
-            InodeNo::BY_COMMIT,
-            InodeNo::ROOT,
-            [].iter().map(|x| *x),
-            offset,
-            reply,
-        )
+        if write_special_dirents(InodeNo::BY_COMMIT, InodeNo::ROOT, &mut offset, reply) {
+            return Ok(());
+        }
+        for x in fs.repo.iter_objects().skip(offset - 2) {
+            offset += 1;
+            if let ObjId::Commit(cid) = x? {
+                if reply.add(
+                    InodeNo::from_commit_id(&cid).as_u64(),
+                    offset as i64,
+                    FileType::Directory,
+                    cid.0.to_hex(),
+                ) {
+                    break;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn getattr(&mut self, _fs: &OstreeFs) -> Result<FileAttr, i32> {
@@ -833,6 +863,21 @@ mod tests {
                 &mountpoint.join("by-commit"),
             );
         })
+    }
+
+    fn ls(path: impl AsRef<Path>) -> Vec<String> {
+        std::fs::read_dir(path.as_ref())
+            .unwrap()
+            .map(|d| d.unwrap().file_name().into_string().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn test_by_commit() {
+        with_fusemnt(|mountpoint, _tmp| {
+            assert_eq!(ls(mountpoint), &["by-commit"]);
+            assert_eq!(ls(mountpoint.join("by-commit")), &[COMMIT_OID])
+        });
     }
 }
 

@@ -9,6 +9,7 @@ use ref_cast::RefCast;
 use std::{
     convert::TryInto,
     error::Error,
+    ffi::{CStr, OsStr},
     fmt::Display,
     fs::File,
     io::{ErrorKind, Read},
@@ -35,6 +36,11 @@ impl Oid {
         out.0[0] = prefix;
         out.0[1..].copy_from_slice(suffix);
         out
+    }
+    pub fn to_hex(&self) -> OidHex {
+        let mut out = [0u8; 65];
+        hex::encode_to_slice(&self.0, &mut out[..64]).unwrap();
+        OidHex(out)
     }
 }
 impl Display for Oid {
@@ -65,6 +71,29 @@ impl AsRef<Oid> for [u8] {
             Ok(a) => Oid::ref_cast(a),
             Err(_) => &Oid::ZERO,
         }
+    }
+}
+
+pub struct OidHex([u8; 65]);
+impl From<Oid> for OidHex {
+    fn from(oid: Oid) -> Self {
+        oid.to_hex()
+    }
+}
+impl AsRef<CStr> for OidHex {
+    fn as_ref(&self) -> &CStr {
+        CStr::from_bytes_with_nul(&self.0).unwrap()
+    }
+}
+impl AsRef<str> for OidHex {
+    fn as_ref(&self) -> &str {
+        std::str::from_utf8(&self.0[..64]).unwrap()
+    }
+}
+impl AsRef<OsStr> for OidHex {
+    fn as_ref(&self) -> &OsStr {
+        let x: &str = self.as_ref();
+        x.as_ref()
     }
 }
 

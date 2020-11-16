@@ -489,24 +489,26 @@ impl OstreeFs {
         let mut dirmetas = HashMap::new();
         let mut dirtrees = HashMap::new();
 
-        repo.for_each_object(|obj_id| match obj_id {
-            ostree_repo::ObjId::Commit(cid) => {
-                commits.insert(InodeNo::from_commit_id(cid), *cid);
+        for r in repo.iter_objects() {
+            match &r? {
+                ostree_repo::ObjId::Commit(cid) => {
+                    commits.insert(InodeNo::from_commit_id(cid), *cid);
+                }
+                ostree_repo::ObjId::DirTree(id) => {
+                    let ino = InodeNo::from_dir_oid(&DirMetaId(Oid::ZERO), id);
+                    let (_, sid) = ino.to_dir_sid();
+                    dirtrees.insert(sid, *id);
+                }
+                ostree_repo::ObjId::DirMeta(id) => {
+                    let ino = InodeNo::from_dir_oid(id, &DirTreeId(Oid::ZERO));
+                    let (sid, _) = ino.to_dir_sid();
+                    dirmetas.insert(sid, *id);
+                }
+                ostree_repo::ObjId::Content(id) => {
+                    files.insert(InodeNo::from_file_id(id), *id);
+                }
             }
-            ostree_repo::ObjId::DirTree(id) => {
-                let ino = InodeNo::from_dir_oid(&DirMetaId(Oid::ZERO), id);
-                let (_, sid) = ino.to_dir_sid();
-                dirtrees.insert(sid, *id);
-            }
-            ostree_repo::ObjId::DirMeta(id) => {
-                let ino = InodeNo::from_dir_oid(id, &DirTreeId(Oid::ZERO));
-                let (sid, _) = ino.to_dir_sid();
-                dirmetas.insert(sid, *id);
-            }
-            ostree_repo::ObjId::Content(id) => {
-                files.insert(InodeNo::from_file_id(id), *id);
-            }
-        })?;
+        }
         Ok(OstreeFs {
             repo,
             commits,

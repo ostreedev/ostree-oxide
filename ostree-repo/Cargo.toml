@@ -8,8 +8,9 @@ edition = "2018"
 
 [dependencies]
 gvariant = "0.4"
-nix = "0.18"
+nix = { git = "https://github.com/wmanley/nix", rev = "121915d2da4ab6f4f0a93099ceb02a6271552e23" }
 hex = "0.4"
+itertools = "0.9"
 ref-cast = "1.0"
 memchr = { version = "2", default-features = false }
 xattr = "0.2"

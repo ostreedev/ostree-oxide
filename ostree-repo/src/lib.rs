@@ -3,6 +3,7 @@ use gvariant::{
     gv, Marker, Structure,
 };
 use hex::{FromHex, ToHex};
+use itertools::Either;
 use nix::{dir::Dir, fcntl::OFlag, sys::stat::Mode};
 use ref_cast::RefCast;
 use std::{
@@ -10,7 +11,8 @@ use std::{
     error::Error,
     fmt::Display,
     fs::File,
-    io::{Read, Write},
+    io::{ErrorKind, Read},
+    iter::empty,
     os::unix::io::{AsRawFd, FromRawFd},
     path::{Path, PathBuf},
 };
@@ -219,76 +221,85 @@ impl Repo {
         let data = self.read_object(&(*oid).into())?;
         Ok(Xattrs::from_data(data))
     }
-    pub fn for_each_object(&self, mut cb: impl FnMut(&ObjId)) -> Result<(), Box<dyn Error>> {
-        for x in 0u8..=255 {
-            let path: PathBuf = ["objects", &format!("{:02x}", x)].iter().collect();
-            let d = Dir::openat(
-                self.repo.as_raw_fd(),
-                &path,
-                OFlag::O_CLOEXEC | OFlag::O_DIRECTORY | OFlag::O_RDONLY,
-                Mode::empty(),
-            );
-            let mut d = match d {
-                Ok(d) => d,
-                Err(nix::Error::Sys(nix::errno::Errno::ENOENT)) => continue,
-                Err(x) => return Err(x.into()),
-            };
-            for y in d.iter() {
-                let e = y?;
-                let filename = e.file_name().to_bytes();
-                match filename {
-                    b"." | b".." => continue,
-                    _ => {}
-                }
-                let (h, ext) = match memchr::memchr(b'.', filename) {
-                    Some(mid) => filename.split_at(mid),
-                    None => {
-                        eprintln!(
-                            "No . in object filename {:?}",
-                            String::from_utf8_lossy(filename)
-                        );
-                        continue;
-                    }
-                };
-                if h.len() != 62 {
-                    eprintln!(
-                        "Wrong length SHA ({}) in {:?}",
-                        h.len(),
-                        String::from_utf8_lossy(filename)
-                    );
-                    continue;
-                }
-                let oid_suffix = match <[u8;31]>::from_hex(h) {
-                    Ok(x) => x,
-                    Err(err) => {
-                        eprintln!(
-                            "Error converting {:?} from hex: {:?}",
-                            String::from_utf8_lossy(&tmp),
-                            err
-                        );
-                        continue;
-                    }
-                };
-                let oid = Oid::from_prefix_suffix(x, &oid_suffix);
-                let objid = match ext {
-                    b".commit" => ObjId::Commit(CommitId(oid)),
-                    b".dirmeta" => ObjId::DirMeta(DirMetaId(oid)),
-                    b".dirtree" => ObjId::DirTree(DirTreeId(oid)),
-                    b".file" => ObjId::Content(ContentId(oid)),
-                    _ => {
-                        eprintln!(
-                            "Incorrect extension {:?} for file: {:?}",
-                            ext,
-                            String::from_utf8_lossy(filename)
-                        );
-                        continue;
-                    }
-                };
-                cb(&objid);
-            }
-        }
-        Ok(())
+    pub fn iter_objects(&self) -> impl Iterator<Item = Result<ObjId, std::io::Error>> + '_ {
+        (0..=255)
+            .into_iter()
+            .map(move |prefix| self.iter_objects_with_prefix(prefix))
+            .flatten()
     }
+    fn iter_objects_with_prefix(
+        &self,
+        prefix: u8,
+    ) -> impl Iterator<Item = Result<ObjId, std::io::Error>> {
+        let path: PathBuf = ["objects", &format!("{:02x}", prefix)].iter().collect();
+        let d = Dir::openat(
+            self.repo.as_raw_fd(),
+            &path,
+            OFlag::O_CLOEXEC | OFlag::O_DIRECTORY | OFlag::O_RDONLY,
+            Mode::empty(),
+        );
+        let d = match d {
+            Ok(d) => d,
+            Err(nix::Error::Sys(nix::errno::Errno::ENOENT)) => {
+                return Either::Right(Either::Left(empty()))
+            }
+            Err(x) => return Either::Right(Either::Right(std::iter::once(Err(nix_to_std(x))))),
+        };
+        Either::Left(d.into_iter().filter_map(move |entry| match entry {
+            Ok(entry) => dirent_to_objid(prefix, entry).map(Ok),
+            Err(x) => Some(Err(nix_to_std(x))),
+        }))
+    }
+}
+
+fn nix_to_std(e: nix::Error) -> std::io::Error {
+    if let nix::Error::Sys(errno) = e {
+        errno.into()
+    } else {
+        std::io::Error::new(ErrorKind::Other, e)
+    }
+}
+
+fn dirent_to_objid(prefix: u8, entry: nix::dir::Entry) -> Option<ObjId> {
+    let filename = entry.file_name().to_bytes();
+    match filename {
+        b"." | b".." => return None,
+        _ => {}
+    }
+    if filename.len() < 62 {
+        eprintln!(
+            "Not a valid object filename: {:?}.  Filename too short",
+            String::from_utf8_lossy(filename)
+        );
+        return None;
+    }
+    let (str_sha, ext) = filename.split_at(62);
+    let oid_suffix = match <[u8; 31]>::from_hex(str_sha) {
+        Ok(x) => x,
+        Err(err) => {
+            eprintln!(
+                "Error converting {:?} from hex: {:?}",
+                String::from_utf8_lossy(&str_sha),
+                err
+            );
+            return None;
+        }
+    };
+    let oid = Oid::from_prefix_suffix(prefix, &oid_suffix);
+    Some(match ext {
+        b".commit" => ObjId::Commit(CommitId(oid)),
+        b".dirmeta" => ObjId::DirMeta(DirMetaId(oid)),
+        b".dirtree" => ObjId::DirTree(DirTreeId(oid)),
+        b".file" => ObjId::Content(ContentId(oid)),
+        _ => {
+            eprintln!(
+                "Incorrect extension {:?} for file: {:?}",
+                ext,
+                String::from_utf8_lossy(filename)
+            );
+            return None;
+        }
+    })
 }
 
 fn buf_as_commit(buf: &AlignedSlice<A8>) -> Commit<'_> {
@@ -467,8 +478,8 @@ mod tests {
         let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         d.push("testdata/repo");
         let r = Repo::open(d.as_path()).unwrap();
-        let mut v = vec![];
-        r.for_each_object(|id| v.push(*id)).unwrap();
+        let v: Result<Vec<_>, _> = r.iter_objects().collect();
+        let v = v.unwrap();
         let oid = Oid([
             0x00u8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x10, 0x11, 0x12, 0x13,
             0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,

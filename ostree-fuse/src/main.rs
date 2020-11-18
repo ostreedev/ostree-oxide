@@ -1,6 +1,5 @@
 use fuse::{mount, FileAttr, FileType, Filesystem};
 use hex::FromHex;
-use libc::{c_int, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR};
 use ostree_repo::{CommitId, ContentId, DirMetaId, DirTreeId, ObjId, Oid, Repo};
 use std::os::unix::ffi::OsStrExt;
 use std::{
@@ -21,8 +20,15 @@ const FOREVER: Timespec = Timespec {
 };
 const TRACING: bool = false;
 
-#[derive(Copy, Clone)]
-struct Errno(c_int);
+#[derive(Copy, Clone, Debug)]
+struct Errno(libc::c_int);
+impl Errno {
+    const EFBIG: Errno = Errno(libc::EFBIG);
+    const EIO: Errno = Errno(libc::EIO);
+    const ENOENT: Errno = Errno(libc::ENOENT);
+    const ENOTDIR: Errno = Errno(libc::ENOTDIR);
+    const EISDIR: Errno = Errno(libc::EISDIR);
+}
 impl From<Errno> for i32 {
     fn from(x: Errno) -> Self {
         x.0
@@ -37,9 +43,24 @@ impl From<std::io::Error> for Errno {
     fn from(x: std::io::Error) -> Self {
         match x.raw_os_error() {
             Some(errno) => Errno(errno),
-            None => Errno(EIO),
+            None => Errno::EIO,
         }
     }
+}
+
+/* This is like the old try! macro, but for the reply pattern that fuse-rs
+ * employs. */
+macro_rules! try_reply {
+    ($reply:expr, $stmt:expr) => {
+        match $stmt {
+            Ok(x) => x,
+            Err(err) => {
+                let err: Errno = err.into();
+                $reply.error(err.0);
+                return;
+            }
+        }
+    };
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
@@ -126,14 +147,14 @@ enum FileRef {
 }
 
 impl FileRef {
-    fn as_inode_mut(&mut self) -> Result<&mut dyn INode, Errno> {
-        Ok(match self {
+    fn as_inode_mut(&mut self) -> &mut dyn INode {
+        match self {
             FileRef::Root(x) => x,
             FileRef::ByCommit(x) => x,
             FileRef::Commit(x) => x,
             FileRef::Tree(x) => x,
             FileRef::File(x) => x,
-        })
+        }
     }
 }
 
@@ -190,15 +211,15 @@ trait INode {
         offset: usize,
         reply: &mut fuse::ReplyDirectory,
     ) -> Result<(), Errno>;
-    fn getattr(&mut self, fs: &OstreeFs) -> Result<FileAttr, i32>;
-    fn lookup(&mut self, fs: &OstreeFs, name: &OsStr) -> Result<FileAttr, i32>;
+    fn getattr(&mut self, fs: &OstreeFs) -> Result<FileAttr, Errno>;
+    fn lookup(&mut self, fs: &OstreeFs, name: &OsStr) -> Result<FileAttr, Errno>;
     fn read(
         &mut self,
         fs: &OstreeFs,
         offset: i64,
         size: u32,
         reply: &mut Vec<u8>,
-    ) -> Result<(), std::io::Error>;
+    ) -> Result<(), Errno>;
 }
 
 struct Root {}
@@ -224,14 +245,14 @@ impl INode for Root {
         )
     }
 
-    fn getattr(&mut self, _fs: &OstreeFs) -> Result<FileAttr, i32> {
+    fn getattr(&mut self, _fs: &OstreeFs) -> Result<FileAttr, Errno> {
         Ok(dir_attr(InodeNo::ROOT))
     }
 
-    fn lookup(&mut self, _fs: &OstreeFs, name: &OsStr) -> Result<FileAttr, i32> {
+    fn lookup(&mut self, _fs: &OstreeFs, name: &OsStr) -> Result<FileAttr, Errno> {
         match name.to_str() {
             Some("by-commit") => Ok(dir_attr(InodeNo::BY_COMMIT)),
-            _ => Err(ENOENT),
+            _ => Err(Errno::ENOENT),
         }
     }
 
@@ -241,8 +262,8 @@ impl INode for Root {
         _offset: i64,
         _size: u32,
         _reply: &mut Vec<u8>,
-    ) -> Result<(), std::io::Error> {
-        Err(Errno(EISDIR).into())
+    ) -> Result<(), Errno> {
+        Err(Errno::EISDIR)
     }
 }
 
@@ -273,16 +294,16 @@ impl INode for ByCommit {
         Ok(())
     }
 
-    fn getattr(&mut self, _fs: &OstreeFs) -> Result<FileAttr, i32> {
+    fn getattr(&mut self, _fs: &OstreeFs) -> Result<FileAttr, Errno> {
         Ok(dir_attr(InodeNo::BY_COMMIT))
     }
 
-    fn lookup(&mut self, fs: &OstreeFs, name: &OsStr) -> Result<FileAttr, i32> {
+    fn lookup(&mut self, fs: &OstreeFs, name: &OsStr) -> Result<FileAttr, Errno> {
         if let Ok(oid) = Oid::from_hex(name.as_bytes()) {
             Commit { oid: CommitId(oid) }.getattr(fs)
         } else {
             eprintln!("Invalid commit oid: {:?}", name);
-            Err(ENOENT)
+            Err(Errno::ENOENT)
         }
     }
 
@@ -292,8 +313,8 @@ impl INode for ByCommit {
         _offset: i64,
         _size: u32,
         _reply: &mut Vec<u8>,
-    ) -> Result<(), std::io::Error> {
-        Err(Errno(EISDIR).into())
+    ) -> Result<(), Errno> {
+        Err(Errno::EISDIR)
     }
 }
 
@@ -306,7 +327,7 @@ impl Commit {
             Ok(x) => x,
             Err(err) => {
                 eprintln!("Error loading commit {:?}: {:?}", self.oid, err);
-                return Err(Errno(ENOENT));
+                return Err(Errno::ENOENT);
             }
         };
         let commit = buf.as_commit();
@@ -326,11 +347,11 @@ impl INode for Commit {
         self.to_tree(&fs.repo)?.readdir(fs, offset, reply)
     }
 
-    fn getattr(&mut self, fs: &OstreeFs) -> Result<FileAttr, i32> {
+    fn getattr(&mut self, fs: &OstreeFs) -> Result<FileAttr, Errno> {
         self.to_tree(&fs.repo)?.getattr(fs)
     }
 
-    fn lookup(&mut self, fs: &OstreeFs, name: &OsStr) -> Result<FileAttr, i32> {
+    fn lookup(&mut self, fs: &OstreeFs, name: &OsStr) -> Result<FileAttr, Errno> {
         self.to_tree(&fs.repo)?.lookup(fs, name)
     }
 
@@ -340,7 +361,7 @@ impl INode for Commit {
         offset: i64,
         size: u32,
         reply: &mut Vec<u8>,
-    ) -> Result<(), std::io::Error> {
+    ) -> Result<(), Errno> {
         self.to_tree(&fs.repo)?.read(fs, offset, size, reply)
     }
 }
@@ -357,7 +378,7 @@ impl INode for Tree {
         mut offset: usize,
         reply: &mut fuse::ReplyDirectory,
     ) -> Result<(), Errno> {
-        let dt_data = fs.repo.read_dirtree(&self.tree).map_err(|_| Errno(EIO))?;
+        let dt_data = fs.repo.read_dirtree(&self.tree).map_err(|_| Errno::EIO)?;
         let dt = dt_data.as_dirtree();
         let mut next_offset: i64 = offset as i64 + 1;
         let dirs = dt.iter_dirs();
@@ -388,8 +409,8 @@ impl INode for Tree {
         Ok(())
     }
 
-    fn getattr(&mut self, fs: &OstreeFs) -> Result<FileAttr, i32> {
-        let meta = fs.repo.read_dirmeta(&self.meta).map_err(|_| EIO)?;
+    fn getattr(&mut self, fs: &OstreeFs) -> Result<FileAttr, Errno> {
+        let meta = fs.repo.read_dirmeta(&self.meta).map_err(|_| Errno::EIO)?;
         Ok(FileAttr {
             ino: InodeNo::from_dir_oid(&self.meta, &self.tree).as_u64(),
             size: 0,
@@ -408,8 +429,11 @@ impl INode for Tree {
         })
     }
 
-    fn lookup(&mut self, fs: &OstreeFs, name: &OsStr) -> Result<FileAttr, i32> {
-        let dt_data = fs.repo.read_dirtree(&self.tree).map_err(|_| ENOENT)?;
+    fn lookup(&mut self, fs: &OstreeFs, name: &OsStr) -> Result<FileAttr, Errno> {
+        let dt_data = fs
+            .repo
+            .read_dirtree(&self.tree)
+            .map_err(|_| Errno::ENOENT)?;
         let dt = dt_data.as_dirtree();
         for de in dt.iter_dirs() {
             if de.name == name {
@@ -425,7 +449,7 @@ impl INode for Tree {
                 return Content { oid: *fe.oid }.getattr(fs);
             }
         }
-        Err(ENOENT)
+        Err(Errno::ENOENT)
     }
     fn read(
         &mut self,
@@ -433,8 +457,8 @@ impl INode for Tree {
         _offset: i64,
         _size: u32,
         _reply: &mut Vec<u8>,
-    ) -> Result<(), std::io::Error> {
-        Err(std::io::Error::from_raw_os_error(EISDIR))
+    ) -> Result<(), Errno> {
+        Err(Errno::EISDIR)
     }
 }
 
@@ -448,15 +472,15 @@ impl INode for Content {
         _offset: usize,
         _reply: &mut fuse::ReplyDirectory,
     ) -> Result<(), Errno> {
-        Err(Errno(ENOTDIR))
+        Err(Errno::ENOTDIR)
     }
 
-    fn lookup(&mut self, _fs: &OstreeFs, _name: &OsStr) -> Result<FileAttr, i32> {
-        Err(ENOTDIR)
+    fn lookup(&mut self, _fs: &OstreeFs, _name: &OsStr) -> Result<FileAttr, Errno> {
+        Err(Errno::ENOTDIR)
     }
 
-    fn getattr(&mut self, fs: &OstreeFs) -> Result<FileAttr, i32> {
-        let meta = fs.repo.read_meta(&self.oid).map_err(|_| EIO)?;
+    fn getattr(&mut self, fs: &OstreeFs) -> Result<FileAttr, Errno> {
+        let meta = fs.repo.read_meta(&self.oid).map_err(|_| Errno::EIO)?;
         let kind = match meta.mode & libc::S_IFMT {
             libc::S_IFBLK => FileType::BlockDevice,
             libc::S_IFCHR => FileType::CharDevice,
@@ -467,7 +491,7 @@ impl INode for Content {
             libc::S_IFLNK => FileType::Symlink,
             _ => {
                 eprintln!("Invalid metadata on file");
-                return Err(EIO);
+                return Err(Errno::EIO);
             }
         };
         Ok(FileAttr {
@@ -494,7 +518,7 @@ impl INode for Content {
         offset: i64,
         size: u32,
         reply: &mut Vec<u8>,
-    ) -> Result<(), std::io::Error> {
+    ) -> Result<(), Errno> {
         let mut f = fs.repo.open_object(&self.oid.into())?;
         f.seek(SeekFrom::Start(offset.try_into().unwrap()))?;
         reply.reserve(size as usize);
@@ -567,12 +591,12 @@ impl OstreeFs {
         if let Some(commit_id) = self.commits.get(&inode) {
             return Ok(FileRef::Commit(Commit { oid: *commit_id }));
         }
-        Err(Errno(ENOENT))
+        Err(Errno::ENOENT)
     }
 }
 
 impl Filesystem for OstreeFs {
-    fn init(&mut self, _req: &fuse::Request) -> Result<(), c_int> {
+    fn init(&mut self, _req: &fuse::Request) -> Result<(), libc::c_int> {
         if TRACING {
             eprintln!("init()");
         }
@@ -584,20 +608,14 @@ impl Filesystem for OstreeFs {
         if TRACING {
             eprintln!("getattr(ino: {:?})", ino);
         }
-        match (|| self.get_by_inode(ino)?.as_inode_mut()?.getattr(self))() {
-            Ok(x) => reply.attr(&FOREVER, &x),
-            Err(errno) => reply.error(errno),
-        }
+        let mut ino = try_reply!(reply, self.get_by_inode(ino));
+        let attr = try_reply!(reply, ino.as_inode_mut().getattr(self));
+        reply.attr(&FOREVER, &attr);
     }
     fn lookup(&mut self, _req: &fuse::Request, parent: u64, name: &OsStr, reply: fuse::ReplyEntry) {
-        match (|| {
-            self.get_by_inode(parent)?
-                .as_inode_mut()?
-                .lookup(self, name)
-        })() {
-            Ok(attr) => reply.entry(&FOREVER, &attr, 0),
-            Err(errno) => reply.error(errno),
-        };
+        let mut ino = try_reply!(reply, self.get_by_inode(parent));
+        let attr = try_reply!(reply, ino.as_inode_mut().lookup(self, name));
+        reply.entry(&FOREVER, &attr, 0);
         if TRACING {
             eprintln!("lookup(parent: {:?}, name: {:?})", parent, name);
         }
@@ -608,12 +626,10 @@ impl Filesystem for OstreeFs {
         }
         let ino = InodeNo::from_u64(ino);
         if let Some(oid) = self.files.get(&ino) {
-            match self.repo.read_content(oid) {
-                Ok(obj) => reply.data(&*obj),
-                Err(_) => reply.error(ENOENT),
-            };
+            let obj = try_reply!(reply, self.repo.read_content(oid));
+            reply.data(&*obj);
         } else {
-            reply.error(ENOENT)
+            reply.error(Errno::ENOENT.into())
         }
     }
     fn open(&mut self, _req: &fuse::Request, ino: u64, flags: u32, reply: fuse::ReplyOpen) {
@@ -638,14 +654,10 @@ impl Filesystem for OstreeFs {
             );
         }
         let mut out = Vec::new();
-        match (|| {
-            self.get_by_inode(ino)?
-                .as_inode_mut()?
-                .read(self, offset, size, &mut out)
-        })() {
-            Ok(()) => reply.data(out.as_ref()),
-            Err(err) => reply.error(err.raw_os_error().unwrap_or(EIO)),
-        }
+        let mut ino = try_reply!(reply, self.get_by_inode(ino));
+        let ino = ino.as_inode_mut();
+        try_reply!(reply, ino.read(self, offset, size, &mut out));
+        reply.data(out.as_ref());
     }
     fn release(
         &mut self,
@@ -678,14 +690,9 @@ impl Filesystem for OstreeFs {
         }
         assert!(offset >= 0);
         let offset: usize = offset as usize;
-        match (|| {
-            self.get_by_inode(ino)?
-                .as_inode_mut()?
-                .readdir(self, offset, &mut reply)
-        })() {
-            Ok(_) => reply.ok(),
-            Err(x) => reply.error(x.into()),
-        };
+        let mut ino = try_reply!(reply, self.get_by_inode(ino));
+        try_reply!(reply, ino.as_inode_mut().readdir(self, offset, &mut reply));
+        reply.ok();
     }
     fn releasedir(
         &mut self,
@@ -711,7 +718,7 @@ impl Filesystem for OstreeFs {
         reply.error(ENOSYS);
     }
     fn access(&mut self, _req: &fuse::Request, _ino: u64, _mask: u32, reply: fuse::ReplyEmpty) {
-        reply.error(ENOSYS);
+        reply.error(libc::ENOSYS)
     }
     fn bmap(
         &mut self,
@@ -721,7 +728,7 @@ impl Filesystem for OstreeFs {
         _idx: u64,
         reply: fuse::ReplyBmap,
     ) {
-        reply.error(ENOSYS);
+        reply.error(libc::ENOSYS);
     }
 }
 

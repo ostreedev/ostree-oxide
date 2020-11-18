@@ -218,23 +218,23 @@ impl Repo {
     fn read_object<A: Alignment>(
         &self,
         oid: &ObjId,
-    ) -> Result<Box<AlignedSlice<A>>, Box<dyn Error>> {
+    ) -> Result<Box<AlignedSlice<A>>, std::io::Error> {
         let f = self.open_object(oid)?;
         Ok(read_to_slice(f, None)?)
     }
-    pub fn read_content(&self, oid: &ContentId) -> Result<Vec<u8>, Box<dyn Error>> {
+    pub fn read_content(&self, oid: &ContentId) -> Result<Vec<u8>, std::io::Error> {
         let mut f = self.open_object(&(*oid).into())?;
         let mut out = vec![];
         f.read_to_end(&mut out)?;
         Ok(out)
     }
-    pub fn read_dirtree(&self, oid: &DirTreeId) -> Result<OwnedDirTree, Box<dyn Error>> {
+    pub fn read_dirtree(&self, oid: &DirTreeId) -> Result<OwnedDirTree, std::io::Error> {
         Ok(OwnedDirTree(self.read_object(&(*oid).into())?))
     }
-    pub fn read_commit(&self, oid: &CommitId) -> Result<OwnedCommit, Box<dyn Error>> {
+    pub fn read_commit(&self, oid: &CommitId) -> Result<OwnedCommit, std::io::Error> {
         Ok(OwnedCommit(self.read_object(&(*oid).into())?))
     }
-    pub fn read_dirmeta(&self, oid: &DirMetaId) -> Result<Meta, Box<dyn Error>> {
+    pub fn read_dirmeta(&self, oid: &DirMetaId) -> Result<Meta, std::io::Error> {
         let data = self.read_object(&(*oid).into())?;
         Ok(Meta::from_data(&*data, 0))
     }

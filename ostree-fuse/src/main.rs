@@ -28,6 +28,7 @@ impl Errno {
     const ENOENT: Errno = Errno(libc::ENOENT);
     const ENOTDIR: Errno = Errno(libc::ENOTDIR);
     const EISDIR: Errno = Errno(libc::EISDIR);
+    const ENODATA: Errno = Errno(libc::ENODATA);
 }
 impl From<Errno> for i32 {
     fn from(x: Errno) -> Self {
@@ -220,6 +221,12 @@ trait INode {
         size: u32,
         reply: &mut Vec<u8>,
     ) -> Result<(), Errno>;
+    fn getxattr(&mut self, _fs: &OstreeFs, _name: &OsStr) -> Result<Vec<u8>, Errno> {
+        Err(Errno::ENODATA)
+    }
+    fn listxattr(&mut self, _fs: &OstreeFs) -> Result<Vec<Vec<u8>>, Errno> {
+        Ok(vec![])
+    }
 }
 
 struct Root {}
@@ -525,6 +532,20 @@ impl INode for Content {
         f.take(size as u64).read_to_end(reply)?;
         Ok(())
     }
+    fn getxattr(&mut self, fs: &OstreeFs, name: &OsStr) -> Result<Vec<u8>, Errno> {
+        let xattrs = fs.repo.read_content_xattrs(&self.oid)?;
+        Ok(xattrs
+            .get(name.as_bytes())
+            .ok_or(Errno::ENODATA)?
+            .to_owned())
+    }
+    fn listxattr(&mut self, fs: &OstreeFs) -> Result<Vec<Vec<u8>>, Errno> {
+        let xattrs = fs.repo.read_content_xattrs(&self.oid)?;
+        Ok(xattrs
+            .iter_keys()
+            .map(|x| x.to_bytes().to_owned())
+            .collect())
+    }
 }
 
 struct OstreeFs {
@@ -707,15 +728,54 @@ impl Filesystem for OstreeFs {
     fn getxattr(
         &mut self,
         _req: &fuse::Request,
-        _ino: u64,
-        _name: &OsStr,
-        _size: u32,
+        ino: u64,
+        name: &OsStr,
+        size: u32,
         reply: fuse::ReplyXattr,
     ) {
-        reply.error(ENOSYS);
+        let mut ino = try_reply!(reply, self.get_by_inode(ino));
+        let xattr = try_reply!(reply, ino.as_inode_mut().getxattr(self, name));
+        let needed: u32 = try_reply!(reply, xattr.len().try_into().map_err(|_| Errno::EFBIG));
+        if needed == 0 {
+            reply.data(&[]);
+        } else if size == 0 {
+            reply.size(needed);
+        } else if size < needed {
+            reply.error(libc::ERANGE)
+        } else {
+            reply.data(&xattr);
+        }
     }
-    fn listxattr(&mut self, _req: &fuse::Request, _ino: u64, _size: u32, reply: fuse::ReplyXattr) {
-        reply.error(ENOSYS);
+    fn listxattr(&mut self, _req: &fuse::Request, ino: u64, size: u32, reply: fuse::ReplyXattr) {
+        if TRACING {
+            eprintln!("listxattr({}, {})", ino, size);
+        }
+        let mut ino = try_reply!(reply, self.get_by_inode(ino));
+        let xattrs = try_reply!(reply, ino.as_inode_mut().listxattr(self));
+        let needed: u32 = try_reply!(
+            reply,
+            xattrs
+                .iter()
+                .map(|x| x.len() + 1)
+                .sum::<usize>()
+                .try_into()
+                .map_err(|_| Errno::EFBIG)
+        );
+        if needed == 0 {
+            reply.data(&[])
+        } else if size == 0 {
+            reply.size(needed)
+        } else if size < needed {
+            reply.error(libc::ERANGE)
+        } else {
+            let mut buf = vec![];
+            buf.reserve_exact(needed as usize);
+            for mut x in xattrs {
+                buf.append(&mut x);
+                buf.push(b'\0');
+            }
+            reply.data(&buf);
+        }
     }
     fn access(&mut self, _req: &fuse::Request, _ino: u64, _mask: u32, reply: fuse::ReplyEmpty) {
         reply.error(libc::ENOSYS)

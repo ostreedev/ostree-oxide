@@ -168,6 +168,8 @@ dependencies = [
  "memchr",
  "nix",
  "ref-cast",
+ "tar",
+ "tempfile",
  "xattr",
 ]
 

@@ -14,3 +14,7 @@ itertools = "0.9"
 ref-cast = "1.0"
 memchr = { version = "2", default-features = false }
 xattr = "0.2"
+
+[dev-dependencies]
+tempfile = "3.1"
+tar = "0.4"

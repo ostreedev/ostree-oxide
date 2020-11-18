@@ -238,7 +238,7 @@ impl Repo {
         let data = self.read_object(&(*oid).into())?;
         Ok(Meta::from_data(&*data, 0))
     }
-    pub fn read_content_xattrs(&self, oid: &ContentId) -> Result<Xattrs, Box<dyn Error>> {
+    pub fn read_content_xattrs(&self, oid: &ContentId) -> Result<Xattrs, std::io::Error> {
         let file = self.open_object(&ObjId::Content(*oid))?;
         let meta = file
             .get_xattr("user.ostreemeta")?
@@ -453,15 +453,19 @@ impl Xattrs {
         let (_, _, _, xattrs) = gv!("(uuua(ayay))").cast(&self.0).to_tuple();
         for x in xattrs {
             let (k, v) = x.to_tuple();
-            if k == key {
-                return Some(v);
+            if let Ok(k) = CStr::from_bytes_with_nul(k) {
+                if k.to_bytes() == key {
+                    return Some(v);
+                }
             }
         }
         None
     }
-    pub fn iter_keys(&self) -> impl Iterator<Item = &[u8]> {
+    pub fn iter_keys(&self) -> impl Iterator<Item = &CStr> {
         let (_, _, _, xattrs) = gv!("(uuua(ayay))").cast(&self.0).to_tuple();
-        xattrs.iter().map(|x| x.to_tuple().0)
+        xattrs
+            .iter()
+            .filter_map(|x| CStr::from_bytes_with_nul(&x.to_tuple().0).ok())
     }
 }
 
@@ -479,9 +483,10 @@ impl Meta {
 
 #[cfg(test)]
 mod tests {
-    use crate::{CommitId, ObjId, Oid, Repo};
+    use crate::{CommitId, ContentId, ObjId, Oid, Repo};
     use hex::FromHex;
-    use std::path::PathBuf;
+    use std::{ffi::CStr, path::PathBuf};
+    use tempfile::tempdir;
 
     #[test]
     fn oid_from_hex() {
@@ -500,6 +505,45 @@ mod tests {
     fn test_open_object() {
         todo!("Open object of all different types, make sure there's no error");
         todo!("Open object that doesn't exist, check for ENOENT");
+    }
+
+    const BARE_USER_REPO_TAR: &[u8] = include_bytes!("../../ostree-repo/testdata/bare-user.tar");
+
+    fn with_repo() -> (tempfile::TempDir, Repo) {
+        // Setup
+        let tmp = tempdir().unwrap();
+        let mountpoint = tmp.path().join("repo");
+        let repo = tmp.path().join("mnt");
+        std::fs::create_dir(&mountpoint).unwrap();
+        std::fs::create_dir(&repo).unwrap();
+
+        let mut bare_user_repo = tar::Archive::new(BARE_USER_REPO_TAR);
+        bare_user_repo.set_unpack_xattrs(true);
+        bare_user_repo.set_preserve_permissions(true);
+        bare_user_repo.unpack(&repo).unwrap();
+
+        let repo = Repo::open(&repo).unwrap();
+        (tmp, repo)
+    }
+
+    #[test]
+    fn test_read_xattrs() {
+        let (_tmpdir, repo) = with_repo();
+        let xattrs = repo
+            .read_content_xattrs(&ContentId(
+                Oid::from_hex("aaf192101c4250090c9c442189abc29f34959fa1f1288d3d58755b4897cb6c53")
+                    .unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(
+            xattrs.iter_keys().collect::<Vec<_>>(),
+            [
+                CStr::from_bytes_with_nul(b"user.cow\0").unwrap(),
+                CStr::from_bytes_with_nul(b"user.no-value\0").unwrap(),
+            ]
+        );
+        assert_eq!(xattrs.get(b"user.no-value").unwrap(), b"");
+        assert_eq!(xattrs.get(b"user.cow").unwrap(), b"goes moo");
     }
 
     #[test]

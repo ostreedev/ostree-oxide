@@ -746,7 +746,7 @@ mod tests {
 
     const FS_TAR: &[u8] = include_bytes!("../../ostree-repo/testdata/fs.tar");
     const BARE_USER_REPO_TAR: &[u8] = include_bytes!("../../ostree-repo/testdata/bare-user.tar");
-    const COMMIT_OID: &str = "247b95a821f9cca301513b1ed57224b906d7e8fe117936db82afac43acee024a";
+    const COMMIT_OID: &str = "36ed56008e2f4f53012f4e3f5235767821c24adb0e14cdd364c420b624f1b323";
 
     fn with_fusemnt(f: impl FnOnce(&Path, &Path)) {
         // Setup

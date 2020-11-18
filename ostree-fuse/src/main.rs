@@ -1,7 +1,6 @@
 use fuse::{mount, FileAttr, FileType, Filesystem};
 use hex::FromHex;
 use ostree_repo::{CommitId, ContentId, DirMetaId, DirTreeId, ObjId, Oid, Repo};
-use std::os::unix::ffi::OsStrExt;
 use std::{
     collections::HashMap,
     convert::TryInto,
@@ -9,6 +8,7 @@ use std::{
     error::Error,
     ffi::OsStr,
     io::{Read, Seek, SeekFrom},
+    os::unix::ffi::OsStrExt,
     path::PathBuf,
 };
 use time::Timespec;

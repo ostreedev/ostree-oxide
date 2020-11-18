@@ -40,7 +40,9 @@ Use it:
 Installation
 ------------
 
-    cargo build --release  &&  ./target/release/
+    cargo build --release
+
+`ostree-fuse` will then be in `target/release/ostree-fuse`.
 
 Status
 ------
@@ -61,9 +63,11 @@ Progress:
 - [x] Lookup commits by SHA
 - [ ] Lookup commits by ref
 - [ ] Listing refs
-- [ ] Listing commits
-- [ ] Tests
-- [ ] SUID files?
+- [x] Listing commits
+- [x] Tests
+- [x] SUID files?
+- [x] xattrs on files
+- [ ] xattrs on directories
 - [ ] Mount remote repositories
 - [ ] Performance measurements and testing
 - [ ] Set up CI

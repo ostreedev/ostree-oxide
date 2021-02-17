@@ -26,16 +26,6 @@ impl Errno {
     const EISDIR: Errno = Errno(libc::EISDIR);
     const ENODATA: Errno = Errno(libc::ENODATA);
 }
-impl From<Errno> for i32 {
-    fn from(x: Errno) -> Self {
-        x.0
-    }
-}
-impl From<Errno> for std::io::Error {
-    fn from(x: Errno) -> Self {
-        std::io::Error::from_raw_os_error(x.0)
-    }
-}
 impl From<std::io::Error> for Errno {
     fn from(x: std::io::Error) -> Self {
         match x.raw_os_error() {
@@ -652,7 +642,7 @@ impl Filesystem for OstreeFs {
             let obj = try_reply!(reply, self.repo.read_content(oid));
             reply.data(&*obj);
         } else {
-            reply.error(Errno::ENOENT.into())
+            reply.error(Errno::ENOENT.0)
         }
     }
     fn open(&mut self, _req: &fuser::Request, ino: u64, flags: i32, reply: fuser::ReplyOpen) {

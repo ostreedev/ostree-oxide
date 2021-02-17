@@ -17,6 +17,7 @@ const FOREVER: Duration = Duration::from_secs(4_000_000_000);
 const TRACING: bool = false;
 
 #[derive(Copy, Clone, Debug)]
+#[repr(transparent)]
 struct Errno(libc::c_int);
 impl Errno {
     const EFBIG: Errno = Errno(libc::EFBIG);

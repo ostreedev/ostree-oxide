@@ -1,4 +1,4 @@
-use fuse::{mount, FileAttr, FileType, Filesystem};
+use fuser::{mount, FileAttr, FileType, Filesystem};
 use hex::FromHex;
 use ostree_repo::{CommitId, ContentId, DirMetaId, DirTreeId, ObjId, Oid, Repo};
 use std::{
@@ -10,14 +10,10 @@ use std::{
     io::{Read, Seek, SeekFrom},
     os::unix::ffi::OsStrExt,
     path::PathBuf,
+    time::{Duration, UNIX_EPOCH},
 };
-use time::Timespec;
 
-const UNIX_EPOCH: Timespec = Timespec { sec: 0, nsec: 0 };
-const FOREVER: Timespec = Timespec {
-    sec: i64::MAX,
-    nsec: 0,
-};
+const FOREVER: Duration = Duration::from_secs(4_000_000_000);
 const TRACING: bool = false;
 
 #[derive(Copy, Clone, Debug)]
@@ -136,6 +132,8 @@ const fn dir_attr(ino: InodeNo) -> FileAttr {
         gid: 0,
         rdev: 0,
         flags: 0,
+        blksize: 512,
+        padding: 0,
     }
 }
 
@@ -164,7 +162,7 @@ fn iter_readdir<'a, It: Iterator<Item = Result<(InodeNo, FileType, &'a OsStr), E
     parent_ino: InodeNo,
     it: It,
     mut offset: usize,
-    reply: &mut fuse::ReplyDirectory,
+    reply: &mut fuser::ReplyDirectory,
 ) -> Result<(), Errno> {
     if write_special_dirents(ino, parent_ino, &mut offset, reply) {
         return Ok(());
@@ -183,7 +181,7 @@ fn write_special_dirents(
     ino: InodeNo,
     parent_ino: InodeNo,
     offset: &mut usize,
-    reply: &mut fuse::ReplyDirectory,
+    reply: &mut fuser::ReplyDirectory,
 ) -> bool {
     if *offset == 0 {
         *offset += 1;
@@ -210,7 +208,7 @@ trait INode {
         &mut self,
         fs: &OstreeFs,
         offset: usize,
-        reply: &mut fuse::ReplyDirectory,
+        reply: &mut fuser::ReplyDirectory,
     ) -> Result<(), Errno>;
     fn getattr(&mut self, fs: &OstreeFs) -> Result<FileAttr, Errno>;
     fn lookup(&mut self, fs: &OstreeFs, name: &OsStr) -> Result<FileAttr, Errno>;
@@ -235,7 +233,7 @@ impl INode for Root {
         &mut self,
         _fs: &OstreeFs,
         offset: usize,
-        reply: &mut fuse::ReplyDirectory,
+        reply: &mut fuser::ReplyDirectory,
     ) -> Result<(), Errno> {
         iter_readdir(
             InodeNo::ROOT,
@@ -280,7 +278,7 @@ impl INode for ByCommit {
         &mut self,
         fs: &OstreeFs,
         mut offset: usize,
-        reply: &mut fuse::ReplyDirectory,
+        reply: &mut fuser::ReplyDirectory,
     ) -> Result<(), Errno> {
         if write_special_dirents(InodeNo::BY_COMMIT, InodeNo::ROOT, &mut offset, reply) {
             return Ok(());
@@ -349,7 +347,7 @@ impl INode for Commit {
         &mut self,
         fs: &OstreeFs,
         offset: usize,
-        reply: &mut fuse::ReplyDirectory,
+        reply: &mut fuser::ReplyDirectory,
     ) -> Result<(), Errno> {
         self.to_tree(&fs.repo)?.readdir(fs, offset, reply)
     }
@@ -383,7 +381,7 @@ impl INode for Tree {
         &mut self,
         fs: &OstreeFs,
         mut offset: usize,
-        reply: &mut fuse::ReplyDirectory,
+        reply: &mut fuser::ReplyDirectory,
     ) -> Result<(), Errno> {
         let dt_data = fs.repo.read_dirtree(&self.tree).map_err(|_| Errno::EIO)?;
         let dt = dt_data.as_dirtree();
@@ -433,6 +431,8 @@ impl INode for Tree {
             gid: meta.gid,
             rdev: 0,
             flags: 0,
+            blksize: 512,
+            padding: 0,
         })
     }
 
@@ -477,7 +477,7 @@ impl INode for Content {
         &mut self,
         _fs: &OstreeFs,
         _offset: usize,
-        _reply: &mut fuse::ReplyDirectory,
+        _reply: &mut fuser::ReplyDirectory,
     ) -> Result<(), Errno> {
         Err(Errno::ENOTDIR)
     }
@@ -516,6 +516,8 @@ impl INode for Content {
             gid: meta.gid,
             rdev: 0,
             flags: 0,
+            blksize: 512,
+            padding: 0,
         })
     }
 
@@ -617,15 +619,15 @@ impl OstreeFs {
 }
 
 impl Filesystem for OstreeFs {
-    fn init(&mut self, _req: &fuse::Request) -> Result<(), libc::c_int> {
+    fn init(&mut self, _req: &fuser::Request, _: &mut fuser::KernelConfig) -> Result<(), libc::c_int> {
         if TRACING {
             eprintln!("init()");
         }
         Ok(())
     }
-    fn destroy(&mut self, _req: &fuse::Request) {}
-    fn forget(&mut self, _req: &fuse::Request, _ino: u64, _nlookup: u64) {}
-    fn getattr(&mut self, _req: &fuse::Request, ino: u64, reply: fuse::ReplyAttr) {
+    fn destroy(&mut self, _req: &fuser::Request) {}
+    fn forget(&mut self, _req: &fuser::Request, _ino: u64, _nlookup: u64) {}
+    fn getattr(&mut self, _req: &fuser::Request, ino: u64, reply: fuser::ReplyAttr) {
         if TRACING {
             eprintln!("getattr(ino: {:?})", ino);
         }
@@ -633,7 +635,7 @@ impl Filesystem for OstreeFs {
         let attr = try_reply!(reply, ino.as_inode_mut().getattr(self));
         reply.attr(&FOREVER, &attr);
     }
-    fn lookup(&mut self, _req: &fuse::Request, parent: u64, name: &OsStr, reply: fuse::ReplyEntry) {
+    fn lookup(&mut self, _req: &fuser::Request, parent: u64, name: &OsStr, reply: fuser::ReplyEntry) {
         let mut ino = try_reply!(reply, self.get_by_inode(parent));
         let attr = try_reply!(reply, ino.as_inode_mut().lookup(self, name));
         reply.entry(&FOREVER, &attr, 0);
@@ -641,7 +643,7 @@ impl Filesystem for OstreeFs {
             eprintln!("lookup(parent: {:?}, name: {:?})", parent, name);
         }
     }
-    fn readlink(&mut self, _req: &fuse::Request, ino: u64, reply: fuse::ReplyData) {
+    fn readlink(&mut self, _req: &fuser::Request, ino: u64, reply: fuser::ReplyData) {
         if TRACING {
             eprintln!("readlink(ino: {:?})", ino);
         }
@@ -653,7 +655,7 @@ impl Filesystem for OstreeFs {
             reply.error(Errno::ENOENT.into())
         }
     }
-    fn open(&mut self, _req: &fuse::Request, ino: u64, flags: u32, reply: fuse::ReplyOpen) {
+    fn open(&mut self, _req: &fuser::Request, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
         if TRACING {
             eprintln!("open(ino: {:?}, flags: {:?})", ino, flags);
         }
@@ -661,12 +663,14 @@ impl Filesystem for OstreeFs {
     }
     fn read(
         &mut self,
-        _req: &fuse::Request,
+        _req: &fuser::Request,
         ino: u64,
         _fh: u64,
         offset: i64,
         size: u32,
-        reply: fuse::ReplyData,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: fuser::ReplyData,
     ) {
         if TRACING {
             eprintln!(
@@ -682,17 +686,17 @@ impl Filesystem for OstreeFs {
     }
     fn release(
         &mut self,
-        _req: &fuse::Request,
+        _req: &fuser::Request,
         _ino: u64,
         _fh: u64,
-        _flags: u32,
-        _lock_owner: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
         _flush: bool,
-        reply: fuse::ReplyEmpty,
+        reply: fuser::ReplyEmpty,
     ) {
         reply.ok();
     }
-    fn opendir(&mut self, _req: &fuse::Request, ino: u64, flags: u32, reply: fuse::ReplyOpen) {
+    fn opendir(&mut self, _req: &fuser::Request, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
         if TRACING {
             eprintln!("opendir(ino: {:?}, flags: {:?})", ino, flags);
         }
@@ -700,11 +704,11 @@ impl Filesystem for OstreeFs {
     }
     fn readdir(
         &mut self,
-        _req: &fuse::Request,
+        _req: &fuser::Request,
         ino: u64,
         _fh: u64,
         offset: i64,
-        mut reply: fuse::ReplyDirectory,
+        mut reply: fuser::ReplyDirectory,
     ) {
         if TRACING {
             eprintln!("readdir(ino: {:?}, offset: {:?})", ino, offset);
@@ -717,21 +721,21 @@ impl Filesystem for OstreeFs {
     }
     fn releasedir(
         &mut self,
-        _req: &fuse::Request,
+        _req: &fuser::Request,
         _ino: u64,
         _fh: u64,
-        _flags: u32,
-        reply: fuse::ReplyEmpty,
+        _flags: i32,
+        reply: fuser::ReplyEmpty,
     ) {
         reply.ok();
     }
     fn getxattr(
         &mut self,
-        _req: &fuse::Request,
+        _req: &fuser::Request,
         ino: u64,
         name: &OsStr,
         size: u32,
-        reply: fuse::ReplyXattr,
+        reply: fuser::ReplyXattr,
     ) {
         let mut ino = try_reply!(reply, self.get_by_inode(ino));
         let xattr = try_reply!(reply, ino.as_inode_mut().getxattr(self, name));
@@ -746,7 +750,7 @@ impl Filesystem for OstreeFs {
             reply.data(&xattr);
         }
     }
-    fn listxattr(&mut self, _req: &fuse::Request, ino: u64, size: u32, reply: fuse::ReplyXattr) {
+    fn listxattr(&mut self, _req: &fuser::Request, ino: u64, size: u32, reply: fuser::ReplyXattr) {
         if TRACING {
             eprintln!("listxattr({}, {})", ino, size);
         }
@@ -777,16 +781,16 @@ impl Filesystem for OstreeFs {
             reply.data(&buf);
         }
     }
-    fn access(&mut self, _req: &fuse::Request, _ino: u64, _mask: u32, reply: fuse::ReplyEmpty) {
+    fn access(&mut self, _req: &fuser::Request, _ino: u64, _mask: i32, reply: fuser::ReplyEmpty) {
         reply.error(libc::ENOSYS)
     }
     fn bmap(
         &mut self,
-        _req: &fuse::Request,
+        _req: &fuser::Request,
         _ino: u64,
         _blocksize: u32,
         _idx: u64,
-        reply: fuse::ReplyBmap,
+        reply: fuser::ReplyBmap,
     ) {
         reply.error(libc::ENOSYS);
     }
@@ -838,7 +842,7 @@ mod tests {
         // fuse-rs documentations, but this is only tests.  See also
         // https://github.com/zargony/fuse-rs/commit/babbfd5ec216b9a7fb43a75872d69c3dfd01879e
         let _m = unsafe {
-            fuse::spawn_mount(
+            fuser::spawn_mount(
                 OstreeFs::new_from_repo(repo).unwrap(),
                 &mountpoint,
                 &options,

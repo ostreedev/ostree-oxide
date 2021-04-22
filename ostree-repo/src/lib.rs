@@ -12,12 +12,14 @@ use std::{
     ffi::{CStr, OsStr},
     fmt::Display,
     fs::File,
-    io::{ErrorKind, Read},
+    io::{self, ErrorKind, Read},
     iter::empty,
     os::unix::ffi::OsStrExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 use xattr::FileExt;
+
+mod refs;
 
 #[derive(Eq, PartialEq, Ord, PartialOrd, Hash, RefCast, Copy, Clone)]
 #[repr(transparent)]
@@ -262,6 +264,14 @@ impl Repo {
             Ok(entry) => dirent_to_objid(prefix, entry).map(Ok),
             Err(x) => Some(Err(x)),
         }))
+    }
+    /// Pass prefix = "refs/heads" for heads. Prefix must start with "refs/"
+    pub fn read_ref(&self, name: &Path) -> io::Result<CommitId> {
+        refs::check_ref_prefix(name)?;
+        refs::read_ref(&self.repo, name)
+    }
+    pub fn list_refs(&self, path: PathBuf) -> io::Result<refs::ListRefs> {
+        refs::ListRefs::new(&self.repo, path)
     }
 }
 

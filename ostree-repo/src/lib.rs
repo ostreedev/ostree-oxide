@@ -279,6 +279,46 @@ impl Repo {
     pub fn list_refs(&self, path: PathBuf) -> io::Result<refs::ListRefs> {
         refs::ListRefs::new(&self.repo, path)
     }
+    /// Iterate through commit history.  This will first yield the commit given by `cid` and then
+    /// it's parent, and then the parent's parent and so on.  Iteration will stop once we reach
+    /// an orphaned commit (one with no parent) or after an error loading a commit occurs.
+    ///
+    /// Note: Commit history may have been pruned, so that commit cannot be loaded. In this case
+    /// an error will be returned with error kind [ErrorKind::NotFound].
+    pub fn iter_commit_history(
+        &self,
+        cid: CommitId,
+    ) -> impl Iterator<Item = io::Result<(CommitId, OwnedCommit)>> + '_ {
+        CommitHistoryIterator {
+            repo: self,
+            next_commit: Some(cid),
+        }
+    }
+}
+
+/// Iterator type returned by [Repo::iter_commit_history].
+pub struct CommitHistoryIterator<'repo> {
+    repo: &'repo Repo,
+    next_commit: Option<CommitId>,
+}
+
+impl<'repo> Iterator for CommitHistoryIterator<'repo> {
+    type Item = io::Result<(CommitId, OwnedCommit)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let commit_id = self.next_commit?;
+        let commit = self.repo.read_commit(&commit_id);
+        match commit {
+            Ok(x) => {
+                self.next_commit = x.as_commit().parent();
+                Some(Ok((commit_id, x)))
+            }
+            Err(err) => {
+                self.next_commit = None;
+                Some(Err(err))
+            }
+        }
+    }
 }
 
 fn dirent_to_objid(prefix: u8, entry: openat::Entry) -> Option<ObjId> {
@@ -337,6 +377,7 @@ fn buf_as_commit(buf: &AlignedSlice<A8>) -> Commit<'_> {
     }
 }
 
+#[derive(Debug)]
 pub struct Commit<'a> {
     //metadata: &'a <unnameable>,
     parent: &'a [u8],
@@ -532,7 +573,7 @@ impl Meta {
 
 #[cfg(test)]
 mod tests {
-    use crate::{CommitId, ContentId, ObjId, Oid, Repo};
+    use super::*;
     use hex::FromHex;
     use std::{ffi::CStr, path::PathBuf};
     use tempfile::tempdir;
@@ -608,5 +649,15 @@ mod tests {
             0x28, 0x29, 0x30, 0x31,
         ]);
         assert_eq!(v[0], ObjId::Commit(CommitId(oid)));
+    }
+
+    #[test]
+    fn test_iter_commit_history() {
+        let (_tmpdir, repo) = with_repo();
+        let cid = repo.read_ref("refs/heads/fs".as_ref()).unwrap();
+        let commit = repo.read_commit(&cid).unwrap();
+        let v: Vec<_> = repo.iter_commit_history(cid).collect();
+        println!("{:?}", &v);
+        assert_eq!(v.len(), 1);
     }
 }

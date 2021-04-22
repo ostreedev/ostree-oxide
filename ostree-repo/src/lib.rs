@@ -169,6 +169,7 @@ impl From<ContentId> for ObjId {
     }
 }
 
+#[derive(Debug)]
 pub struct Repo {
     repo: Dir,
 }

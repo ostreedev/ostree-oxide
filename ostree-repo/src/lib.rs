@@ -4,7 +4,7 @@ use gvariant::{
 };
 use hex::{FromHex, ToHex};
 use itertools::Either;
-use nix::{dir::Dir, fcntl::OFlag, sys::stat::Mode};
+use openat::Dir;
 use ref_cast::RefCast;
 use std::{
     convert::TryInto,
@@ -14,8 +14,8 @@ use std::{
     fs::File,
     io::{ErrorKind, Read},
     iter::empty,
-    os::unix::io::{AsRawFd, FromRawFd},
-    path::{Path, PathBuf},
+    os::unix::ffi::OsStrExt,
+    path::PathBuf,
 };
 use xattr::FileExt;
 
@@ -133,19 +133,6 @@ impl ContentId {
     }
 }
 
-fn open_file_at(d: &Dir, path: &impl AsRef<Path>) -> nix::Result<File> {
-    let fd = nix::fcntl::openat(
-        d.as_raw_fd(),
-        path.as_ref(),
-        OFlag::O_CLOEXEC | OFlag::O_RDONLY,
-        Mode::empty(),
-    )?;
-    // The invariant that we need to uphold for this unsafe block is that the fd
-    // must be owned by only one object.  As we've just created this fd this is
-    // safe:
-    Ok(unsafe { File::from_raw_fd(fd) })
-}
-
 #[derive(Debug, Eq, PartialEq)]
 pub enum ObjType {
     COMMIT,
@@ -188,11 +175,7 @@ pub struct Repo {
 
 impl Repo {
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, Box<dyn Error>> {
-        let repo = Dir::open(
-            path.as_ref(),
-            OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_RDONLY,
-            Mode::empty(),
-        )?;
+        let repo = Dir::open(path.as_ref())?;
         Ok(Self { repo })
     }
     pub fn open_object(&self, oid: &ObjId) -> Result<File, std::io::Error> {
@@ -209,7 +192,7 @@ impl Repo {
             hex::encode(&sha.0[1..]),
             extension
         );
-        Ok(open_file_at(&self.repo, &path).map_err(|x| x.as_errno().unwrap())?)
+        self.repo.open_file(path)
     }
     pub fn read_meta(&self, oid: &ContentId) -> Result<Meta, Box<dyn Error>> {
         let file = self.open_object(&ObjId::Content(*oid))?;
@@ -266,36 +249,23 @@ impl Repo {
         prefix: u8,
     ) -> impl Iterator<Item = Result<ObjId, std::io::Error>> {
         let path: PathBuf = ["objects", &format!("{:02x}", prefix)].iter().collect();
-        let d = Dir::openat(
-            self.repo.as_raw_fd(),
-            &path,
-            OFlag::O_CLOEXEC | OFlag::O_DIRECTORY | OFlag::O_RDONLY,
-            Mode::empty(),
-        );
+        let d = self.repo.list_dir(&path);
         let d = match d {
             Ok(d) => d,
-            Err(nix::Error::Sys(nix::errno::Errno::ENOENT)) => {
+            Err(err) if err.kind() == ErrorKind::NotFound => {
                 return Either::Right(Either::Left(empty()))
             }
-            Err(x) => return Either::Right(Either::Right(std::iter::once(Err(nix_to_std(x))))),
+            Err(x) => return Either::Right(Either::Right(std::iter::once(Err(x)))),
         };
         Either::Left(d.into_iter().filter_map(move |entry| match entry {
             Ok(entry) => dirent_to_objid(prefix, entry).map(Ok),
-            Err(x) => Some(Err(nix_to_std(x))),
+            Err(x) => Some(Err(x)),
         }))
     }
 }
 
-fn nix_to_std(e: nix::Error) -> std::io::Error {
-    if let nix::Error::Sys(errno) = e {
-        errno.into()
-    } else {
-        std::io::Error::new(ErrorKind::Other, e)
-    }
-}
-
-fn dirent_to_objid(prefix: u8, entry: nix::dir::Entry) -> Option<ObjId> {
-    let filename = entry.file_name().to_bytes();
+fn dirent_to_objid(prefix: u8, entry: openat::Entry) -> Option<ObjId> {
+    let filename = entry.file_name().as_bytes();
     match filename {
         b"." | b".." => return None,
         _ => {}

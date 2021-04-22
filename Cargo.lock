@@ -134,6 +134,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "openat"
+version = "0.1.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95aa7c05907b3ebde2610d602f4ddd992145cc6a84493647c30396f30ba83abe"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "ostree-fuse"
 version = "0.1.0"
 dependencies = [
@@ -157,7 +166,7 @@ dependencies = [
  "hex",
  "itertools",
  "memchr",
- "nix",
+ "openat",
  "ref-cast",
  "tar",
  "tempfile",

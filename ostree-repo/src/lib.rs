@@ -19,7 +19,7 @@ use std::{
 };
 use xattr::FileExt;
 
-#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash, RefCast, Copy, Clone)]
+#[derive(Eq, PartialEq, Ord, PartialOrd, Hash, RefCast, Copy, Clone)]
 #[repr(transparent)]
 pub struct Oid(pub [u8; 32]);
 impl Oid {
@@ -46,6 +46,11 @@ impl Oid {
 impl Display for Oid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Oid::from_hex(\"{}\")", hex::encode(self.0))
+    }
+}
+impl std::fmt::Debug for Oid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self, f)
     }
 }
 

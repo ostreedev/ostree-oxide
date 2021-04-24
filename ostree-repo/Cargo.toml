@@ -8,10 +8,11 @@ edition = "2018"
 
 [dependencies]
 gvariant = "0.4"
-openat = "0.1"
+openat = { git = "https://github.com/wmanley/openat", rev = "76a795de1aa803d41bdfaeca6bf3855c12c5d940" }
 hex = "0.4"
 itertools = "0.9"
 ref-cast = "1.0"
+rayon = "1"
 memchr = { version = "2", default-features = false }
 xattr = "0.2"
 

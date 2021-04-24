@@ -20,6 +20,8 @@ use std::{
 };
 use xattr::FileExt;
 
+pub use prune::prune;
+mod prune;
 mod refs;
 
 #[derive(Eq, PartialEq, Ord, PartialOrd, Hash, RefCast, Copy, Clone)]

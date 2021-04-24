@@ -403,6 +403,11 @@ impl<'a> From<&'a OwnedCommit> for Commit<'a> {
         buf_as_commit(&x.0)
     }
 }
+impl std::fmt::Debug for OwnedCommit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.as_commit())
+    }
+}
 
 // (a(say)a(sayay))
 #[derive(Debug, RefCast)]

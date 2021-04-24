@@ -328,8 +328,8 @@ impl Commit {
         };
         let commit = buf.as_commit();
         Ok(Tree {
-            meta: *commit.dirmeta,
-            tree: *commit.dirtree,
+            meta: commit.root_dirmeta(),
+            tree: commit.root_dirtree(),
         })
     }
 }

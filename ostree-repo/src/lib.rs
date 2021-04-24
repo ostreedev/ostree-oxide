@@ -16,6 +16,7 @@ use std::{
     iter::empty,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use xattr::FileExt;
 
@@ -125,6 +126,11 @@ impl DirTreeId {
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash, RefCast, Copy, Clone)]
 #[repr(transparent)]
 pub struct DirMetaId(pub Oid);
+impl DirMetaId {
+    pub fn try_from_slice(s: &[u8]) -> Option<&Self> {
+        Some(Self::ref_cast(Oid::try_from_slice(s)?))
+    }
+}
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash, RefCast, Copy, Clone)]
 #[repr(transparent)]
@@ -319,19 +325,71 @@ fn dirent_to_objid(prefix: u8, entry: openat::Entry) -> Option<ObjId> {
 
 fn buf_as_commit(buf: &AlignedSlice<A8>) -> Commit<'_> {
     let c = gv!("(a{sv}aya(say)sstayay)").cast(&buf);
-    let (_, parent, _, _, _, _, dirtree, dirmeta) = c.to_tuple();
-
+    let (_metadata, parent, _related, subject, body, timestamp, root_contents, root_metadata) =
+        c.to_tuple();
     Commit {
-        parent: CommitId::ref_cast(parent.as_ref()),
-        dirtree: DirTreeId::ref_cast(dirtree.as_ref()),
-        dirmeta: DirMetaId::ref_cast(dirmeta.as_ref()),
+        parent,
+        subject,
+        body,
+        timestamp,
+        root_contents,
+        root_metadata,
     }
 }
 
 pub struct Commit<'a> {
-    pub parent: &'a CommitId,
-    pub dirtree: &'a DirTreeId,
-    pub dirmeta: &'a DirMetaId,
+    //metadata: &'a <unnameable>,
+    parent: &'a [u8],
+    //related: &'a <unnameable>,
+    subject: &'a gvariant::Str,
+    body: &'a gvariant::Str,
+    timestamp: &'a u64,
+    root_contents: &'a [u8],
+    root_metadata: &'a [u8],
+}
+
+impl<'a> Commit<'a> {
+    /// Parent commit
+    ///
+    /// This will be `None` if the commit was created with `ostree commit --orphan`.
+    pub fn parent(&self) -> Option<CommitId> {
+        CommitId::try_from_slice(self.parent).copied()
+    }
+    /// One line subject
+    ///
+    /// Note: this isn't guaranteed to be a single line, it's just a convention.
+    ///
+    /// This can also be empty if a subject wasn't specified at commit creation time.
+    pub fn subject(&self) -> &str {
+        self.subject.into()
+    }
+    /// Full description
+    ///
+    /// This can be empty if it wasn't specified at commit creation time.
+    pub fn body(&self) -> &str {
+        self.body.into()
+    }
+    pub fn root_dirtree(&self) -> DirTreeId {
+        match DirTreeId::try_from_slice(self.root_contents) {
+            Some(x) => *x,
+            None => {
+                //warn!("DirTree invalid in commit");
+                *DirTreeId::ref_cast(&Oid::ZERO)
+            }
+        }
+    }
+    pub fn root_dirmeta(&self) -> DirMetaId {
+        match DirMetaId::try_from_slice(self.root_metadata) {
+            Some(x) => *x,
+            None => {
+                //warn!("DirTree invalid in commit");
+                *DirMetaId::ref_cast(&Oid::ZERO)
+            }
+        }
+    }
+    pub fn timestamp(&self) -> SystemTime {
+        UNIX_EPOCH + Duration::new(*self.timestamp, 0)
+    }
 }
 
 pub struct OwnedCommit(Box<AlignedSlice<A8>>);

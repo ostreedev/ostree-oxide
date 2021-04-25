@@ -1,6 +1,7 @@
 [workspace]
 
 members = [
+    "ostree-cmd",
     "ostree-fuse",
     "ostree-repo",
 ]

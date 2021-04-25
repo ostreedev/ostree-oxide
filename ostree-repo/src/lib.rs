@@ -352,6 +352,7 @@ fn dirent_to_objid(prefix: u8, entry: openat::Entry) -> Option<ObjId> {
         b".dirmeta" => ObjId::DirMeta(DirMetaId(oid)),
         b".dirtree" => ObjId::DirTree(DirTreeId(oid)),
         b".file" => ObjId::Content(ContentId(oid)),
+        b".filez" => ObjId::Content(ContentId(oid)),
         _ => {
             eprintln!(
                 "Incorrect extension {:?} for file: {:?}",

@@ -183,11 +183,11 @@ pub struct Repo {
 }
 
 impl Repo {
-    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, Box<dyn Error>> {
+    pub fn open(path: impl AsRef<std::path::Path>) -> io::Result<Self> {
         let repo = Dir::open(path.as_ref())?;
         Ok(Self { repo })
     }
-    pub fn open_object(&self, oid: &ObjId) -> Result<File, std::io::Error> {
+    pub fn open_object(&self, oid: &ObjId) -> io::Result<File> {
         let (extension, sha) = match oid {
             ObjId::Commit(oid) => ("commit", oid.0),
             ObjId::DirTree(oid) => ("dirtree", oid.0),
@@ -203,7 +203,7 @@ impl Repo {
         );
         self.repo.open_file(path)
     }
-    pub fn read_meta(&self, oid: &ContentId) -> Result<Meta, Box<dyn Error>> {
+    pub fn read_meta(&self, oid: &ContentId) -> io::Result<Meta> {
         let file = self.open_object(&ObjId::Content(*oid))?;
         let meta = file
             .get_xattr("user.ostreemeta")?
@@ -219,16 +219,16 @@ impl Repo {
         let f = self.open_object(oid)?;
         Ok(read_to_slice(f, None)?)
     }
-    pub fn read_content(&self, oid: &ContentId) -> Result<Vec<u8>, std::io::Error> {
+    pub fn read_content(&self, oid: &ContentId) -> io::Result<Vec<u8>> {
         let mut f = self.open_object(&(*oid).into())?;
         let mut out = vec![];
         f.read_to_end(&mut out)?;
         Ok(out)
     }
-    pub fn read_dirtree(&self, oid: &DirTreeId) -> Result<OwnedDirTree, std::io::Error> {
+    pub fn read_dirtree(&self, oid: &DirTreeId) -> io::Result<OwnedDirTree> {
         Ok(OwnedDirTree(self.read_object(&(*oid).into())?))
     }
-    pub fn read_commit(&self, oid: &CommitId) -> Result<OwnedCommit, std::io::Error> {
+    pub fn read_commit(&self, oid: &CommitId) -> io::Result<OwnedCommit> {
         Ok(OwnedCommit(self.read_object(&(*oid).into())?))
     }
     pub fn read_dirmeta(&self, oid: &DirMetaId) -> Result<Meta, std::io::Error> {

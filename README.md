@@ -9,6 +9,7 @@ It consists of:
 1. [ostree-repo](ostree-repo) - a rust library for working with ostree repos.
 2. [ostree-fuse](ostree-fuse/README.md) - a FUSE implementation allowing ostree
    commits to be mounted from bare-user ostree repositories.
+3. [ostree-cmd](ostree-cmd) - a limited command line interface mimicing `ostree`
 
 Status
 ------

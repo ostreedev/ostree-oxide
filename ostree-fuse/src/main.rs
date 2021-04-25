@@ -610,7 +610,11 @@ impl OstreeFs {
 }
 
 impl Filesystem for OstreeFs {
-    fn init(&mut self, _req: &fuser::Request, _: &mut fuser::KernelConfig) -> Result<(), libc::c_int> {
+    fn init(
+        &mut self,
+        _req: &fuser::Request,
+        _: &mut fuser::KernelConfig,
+    ) -> Result<(), libc::c_int> {
         if TRACING {
             eprintln!("init()");
         }
@@ -626,7 +630,13 @@ impl Filesystem for OstreeFs {
         let attr = try_reply!(reply, ino.as_inode_mut().getattr(self));
         reply.attr(&FOREVER, &attr);
     }
-    fn lookup(&mut self, _req: &fuser::Request, parent: u64, name: &OsStr, reply: fuser::ReplyEntry) {
+    fn lookup(
+        &mut self,
+        _req: &fuser::Request,
+        parent: u64,
+        name: &OsStr,
+        reply: fuser::ReplyEntry,
+    ) {
         let mut ino = try_reply!(reply, self.get_by_inode(parent));
         let attr = try_reply!(reply, ino.as_inode_mut().lookup(self, name));
         reply.entry(&FOREVER, &attr, 0);

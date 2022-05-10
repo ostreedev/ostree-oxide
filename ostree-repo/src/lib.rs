@@ -1,5 +1,5 @@
 use gvariant::{
-    aligned_bytes::{copy_to_align, read_to_slice, AlignedSlice, Alignment, AsAligned, A1, A4, A8},
+    aligned_bytes::{AlignedBuf, AsAligned},
     gv, Marker, Structure,
 };
 use hex::{FromHex, ToHex};
@@ -210,16 +210,14 @@ impl Repo {
         let meta = file
             .get_xattr("user.ostreemeta")?
             .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
-        let meta = copy_to_align(&meta);
         let m = file.metadata()?;
-        Ok(Meta::from_data(meta.as_ref(), m.len()))
+        Ok(Meta::from_data(meta, m.len()))
     }
-    fn read_object<A: Alignment>(
-        &self,
-        oid: &ObjId,
-    ) -> Result<Box<AlignedSlice<A>>, std::io::Error> {
-        let f = self.open_object(oid)?;
-        Ok(read_to_slice(f, None)?)
+    fn read_object(&self, oid: &ObjId) -> Result<Vec<u8>, std::io::Error> {
+        let mut buf = vec![];
+        let mut f = self.open_object(oid)?;
+        f.read_to_end(&mut buf)?;
+        Ok(buf)
     }
     pub fn read_content(&self, oid: &ContentId) -> io::Result<Vec<u8>> {
         let mut f = self.open_object(&(*oid).into())?;
@@ -231,18 +229,17 @@ impl Repo {
         Ok(OwnedDirTree(self.read_object(&(*oid).into())?))
     }
     pub fn read_commit(&self, oid: &CommitId) -> io::Result<OwnedCommit> {
-        Ok(OwnedCommit(self.read_object(&(*oid).into())?))
+        Ok(OwnedCommit(self.read_object(&(*oid).into())?.into()))
     }
     pub fn read_dirmeta(&self, oid: &DirMetaId) -> Result<Meta, std::io::Error> {
         let data = self.read_object(&(*oid).into())?;
-        Ok(Meta::from_data(&*data, 0))
+        Ok(Meta::from_data(data, 0))
     }
     pub fn read_content_xattrs(&self, oid: &ContentId) -> Result<Xattrs, std::io::Error> {
         let file = self.open_object(&ObjId::Content(*oid))?;
         let meta = file
             .get_xattr("user.ostreemeta")?
             .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
-        let meta = copy_to_align(&meta).into_owned();
         Ok(Xattrs::from_data(meta))
     }
     pub fn read_dirmeta_xattrs(&self, oid: &DirMetaId) -> Result<Xattrs, Box<dyn Error>> {
@@ -366,20 +363,6 @@ fn dirent_to_objid(prefix: u8, entry: openat::Entry) -> Option<ObjId> {
     })
 }
 
-fn buf_as_commit(buf: &AlignedSlice<A8>) -> Commit<'_> {
-    let c = gv!("(a{sv}aya(say)sstayay)").cast(&buf);
-    let (_metadata, parent, _related, subject, body, timestamp, root_contents, root_metadata) =
-        c.to_tuple();
-    Commit {
-        parent,
-        subject,
-        body,
-        timestamp,
-        root_contents,
-        root_metadata,
-    }
-}
-
 #[derive(Debug)]
 pub struct Commit<'a> {
     //metadata: &'a <unnameable>,
@@ -436,7 +419,7 @@ impl<'a> Commit<'a> {
     }
 }
 
-pub struct OwnedCommit(Box<AlignedSlice<A8>>);
+pub struct OwnedCommit(AlignedBuf);
 impl OwnedCommit {
     pub fn as_commit(&self) -> Commit<'_> {
         self.into()
@@ -444,7 +427,17 @@ impl OwnedCommit {
 }
 impl<'a> From<&'a OwnedCommit> for Commit<'a> {
     fn from(x: &'a OwnedCommit) -> Self {
-        buf_as_commit(&x.0)
+        let c = gv!("(a{sv}aya(say)sstayay)").cast(&x.0);
+        let (_metadata, parent, _related, subject, body, timestamp, root_contents, root_metadata) =
+            c.to_tuple();
+        Commit {
+            parent,
+            subject,
+            body,
+            timestamp,
+            root_contents,
+            root_metadata,
+        }
     }
 }
 impl std::fmt::Debug for OwnedCommit {
@@ -456,9 +449,9 @@ impl std::fmt::Debug for OwnedCommit {
 // (a(say)a(sayay))
 #[derive(Debug, RefCast)]
 #[repr(transparent)]
-pub struct DirTree<'a>(&'a AlignedSlice<A1>);
+pub struct DirTree<'a>(&'a [u8]);
 
-pub struct OwnedDirTree(Box<AlignedSlice<A1>>);
+pub struct OwnedDirTree(Vec<u8>);
 impl OwnedDirTree {
     pub fn as_dirtree(&self) -> DirTree<'_> {
         self.into()
@@ -472,14 +465,20 @@ impl<'a> From<&'a OwnedDirTree> for DirTree<'a> {
 
 impl<'a> DirTree<'a> {
     pub fn from_bytes(b: &'a [u8]) -> Self {
-        DirTree(b.as_aligned())
+        DirTree(b)
     }
     pub fn iter_files(&'a self) -> impl Iterator<Item = FileEntry<'a>> + ExactSizeIterator {
-        let files = gv!("(a(say)a(sayay))").cast(&self.0).to_tuple().0;
+        let files = gv!("(a(say)a(sayay))")
+            .cast(self.0.as_aligned())
+            .to_tuple()
+            .0;
         files.into_iter().map(|x| x.to_tuple().into())
     }
     pub fn iter_dirs(&'a self) -> impl Iterator<Item = DirEntry<'a>> + ExactSizeIterator {
-        let files = gv!("(a(say)a(sayay))").cast(&self.0).to_tuple().1;
+        let files = gv!("(a(say)a(sayay))")
+            .cast(self.0.as_aligned())
+            .to_tuple()
+            .1;
         files.into_iter().map(|x| x.to_tuple().into())
     }
 }
@@ -537,13 +536,13 @@ pub struct Meta {
     pub mode: u32,
     pub size: u64,
 }
-pub struct Xattrs(Box<AlignedSlice<A4>>);
+pub struct Xattrs(AlignedBuf);
 impl Xattrs {
-    fn from_data(data: Box<AlignedSlice<A4>>) -> Xattrs {
-        Xattrs(data)
+    fn from_data(data: Vec<u8>) -> Xattrs {
+        Xattrs(data.into())
     }
     pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
-        let (_, _, _, xattrs) = gv!("(uuua(ayay))").cast(&self.0).to_tuple();
+        let (_, _, _, xattrs) = gv!("(uuua(ayay))").cast(self.0.as_aligned()).to_tuple();
         for x in xattrs {
             let (k, v) = x.to_tuple();
             if let Ok(k) = CStr::from_bytes_with_nul(k) {
@@ -555,7 +554,7 @@ impl Xattrs {
         None
     }
     pub fn iter_keys(&self) -> impl Iterator<Item = &CStr> {
-        let (_, _, _, xattrs) = gv!("(uuua(ayay))").cast(&self.0).to_tuple();
+        let (_, _, _, xattrs) = gv!("(uuua(ayay))").cast(self.0.as_aligned()).to_tuple();
         xattrs
             .iter()
             .filter_map(|x| CStr::from_bytes_with_nul(&x.to_tuple().0).ok())
@@ -563,8 +562,9 @@ impl Xattrs {
 }
 
 impl Meta {
-    pub fn from_data(data: &AlignedSlice<A4>, size: u64) -> Self {
-        let (uid, gid, mode, _xattrs) = gv!("(uuua(ayay))").cast(data).to_tuple();
+    pub fn from_data(data: Vec<u8>, size: u64) -> Self {
+        let buf: AlignedBuf = data.into();
+        let (uid, gid, mode, _xattrs) = gv!("(uuua(ayay))").cast(buf.as_aligned()).to_tuple();
         Self {
             uid: u32::from_be(*uid),
             gid: u32::from_be(*gid),

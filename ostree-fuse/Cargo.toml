@@ -16,6 +16,6 @@ hex = "0.4"
 rand = "0.7"
 
 [dev-dependencies]
-nix = { git = "https://github.com/wmanley/nix", rev = "121915d2da4ab6f4f0a93099ceb02a6271552e23" }
+nix = "0.20"
 tempfile = "3.1"
 tar = "0.4"
